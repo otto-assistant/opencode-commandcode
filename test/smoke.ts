@@ -13,13 +13,18 @@ async function main() {
     readCommandCodeApiKeyFromEnv,
   } = await import("../src/credentials.ts");
   const {
-    COMMAND_CODE_MODELS,
     buildEffortVariants,
     getCommandModels,
+    refreshCommandModels,
+    invalidateCommandModelCache,
     isLoginPlaceholderModel,
     resolveCommandModelId,
     findCommandModel,
   } = await import("../src/models.ts");
+  const {
+    parseListModelsOutput,
+    parseModelsMarkdown,
+  } = await import("../src/model-discover.ts");
   const {
     encodeCommandModelSelection,
     decodeCommandModelSelection,
@@ -81,30 +86,62 @@ async function main() {
   );
   assert.equal(readCommandCodeApiKeyFromEnv({}), null);
 
-  // --- models / Laguna ---
-  const models = getCommandModels();
-  assert.ok(models.some((m) => m.resolvedId === LAGUNA_MODEL_ID));
-  assert.equal(resolveCommandModelId("laguna"), LAGUNA_MODEL_ID);
-  assert.equal(resolveCommandModelId("laguna-s-2.1-free"), LAGUNA_MODEL_ID);
-  assert.equal(resolveCommandModelId(DEFAULT_MODEL_ID), LAGUNA_MODEL_ID);
+  // --- models (dynamic catalog) ---
+  invalidateCommandModelCache();
+  const models = refreshCommandModels();
+  assert.ok(models.length >= 1, "expected at least one discovered model");
   assert.equal(isLoginPlaceholderModel("login"), true);
-  const laguna = findCommandModel("laguna")!;
-  assert.equal(laguna.vision, false);
-  assert.equal(laguna.free, true);
-  assert.equal(laguna.contextWindow, 256_000);
-
-  const variants = buildEffortVariants(laguna);
-  for (const level of EFFORT_LEVELS) {
-    assert.ok(variants[level]);
-    assert.equal(isCommandEffort(level), true);
+  if (models.some((m) => m.resolvedId === LAGUNA_MODEL_ID)) {
+    assert.equal(resolveCommandModelId("laguna"), LAGUNA_MODEL_ID);
+    assert.equal(resolveCommandModelId("laguna-s-2.1-free"), LAGUNA_MODEL_ID);
+    assert.equal(resolveCommandModelId(DEFAULT_MODEL_ID), LAGUNA_MODEL_ID);
+    const laguna = findCommandModel("laguna")!;
+    assert.equal(laguna.vision, false);
+    assert.equal(laguna.free, true);
+    assert.equal(laguna.contextWindow, 256_000);
+    const variants = buildEffortVariants(laguna);
+    assert.equal(typeof variants, "object");
   }
-  assert.deepEqual(variants.none, { disabled: true });
+
+  const parsedList = parseListModelsOutput(`
+Available models  ·  2 models
+
+Open Source
+
+deepseek/deepseek-v4-pro             hybrid reasoning
+poolside/laguna-s-2.1-free           FREE open-weight
+
+Anthropic
+
+claude-sonnet-5                      recommended
+`);
+  assert.equal(parsedList.length, 3);
+  assert.equal(parsedList[0]?.id, "deepseek/deepseek-v4-pro");
+  const md = parseModelsMarkdown(`
+| Id | Name | Context | Efforts | Best for |
+|---|---|---|---|---|
+| \`poolside/laguna-s-2.1-free\` | Laguna S 2.1 | 256K | — | coding |
+| \`claude-sonnet-5\` | Claude Sonnet 5 | 1M | low, medium, high, xhigh, max | agents |
+`);
+  assert.equal(md.get("claude-sonnet-5")?.contextWindow, 1_000_000);
+  assert.deepEqual(md.get("claude-sonnet-5")?.efforts, [
+    "low",
+    "medium",
+    "high",
+    "xhigh",
+    "max",
+  ]);
 
   const selection = resolveCommandModelSelection("laguna", "high");
   const encoded = encodeCommandModelSelection(selection);
   const decoded = decodeCommandModelSelection(encoded);
   assert.equal(decoded?.modelId, LAGUNA_MODEL_ID);
   assert.equal(decoded?.effort, "high");
+  assert.equal(PROVIDER_ID, "command-code");
+  for (const level of EFFORT_LEVELS) {
+    assert.equal(isCommandEffort(level), true);
+  }
+  assert.ok(getCommandModels().length >= 1);
 
   // --- attachments (text-only Laguna strips images; files/pdfs inlined) ---
   const png =

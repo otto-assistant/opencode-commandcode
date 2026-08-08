@@ -1,7 +1,19 @@
 /**
- * Command Code model catalog — Laguna S 2.1 free is the primary target.
+ * Command Code model catalog — discovered dynamically from the installed CLI.
+ * Laguna remains the preferred default when present (unlimited free tier for tests),
+ * but every model from `cmd --list-models` is exposed in OpenCode.
  */
-import { EFFORT_LEVELS, type CommandEffort, LAGUNA_MODEL_ID } from "./constants.js";
+import {
+  EFFORT_LEVELS,
+  type CommandEffort,
+  DEFAULT_MODEL_ID,
+  LAGUNA_MODEL_ID,
+} from "./constants.js";
+import {
+  discoverCommandModels,
+  type DiscoveredModelMeta,
+} from "./model-discover.js";
+import { log } from "./log.js";
 
 export type CommandModel = {
   id: string;
@@ -14,50 +26,24 @@ export type CommandModel = {
   vision: boolean;
   /** Free-tier badge. */
   free?: boolean;
+  /** Supported effort levels from Command Code (empty → model decides). */
+  efforts?: CommandEffort[];
 };
 
-const LIMIT_256K = { context: 256_000, output: 32_768 } as const;
+const CATALOG_TTL_MS = 30 * 60 * 1000;
 
-function model(
-  id: string,
-  name: string,
-  resolvedId: string,
-  limit: { context: number; output: number },
-  opts?: { vision?: boolean; free?: boolean; reasoning?: boolean },
-): CommandModel {
-  return {
-    id,
-    name,
-    resolvedId,
-    reasoning: opts?.reasoning !== false,
-    contextWindow: limit.context,
-    maxTokens: limit.output,
-    vision: opts?.vision === true,
-    free: opts?.free,
-  };
-}
+let cachedModels: CommandModel[] | null = null;
+let cachedAt = 0;
 
-/**
- * Primary catalog for this plugin. Laguna is the default and exclusive
- * live-test target; aliases keep OpenCode menus short.
- */
-export const COMMAND_CODE_MODELS: CommandModel[] = [
-  model("laguna-s-2.1-free", "Laguna S 2.1 (free)", LAGUNA_MODEL_ID, LIMIT_256K, {
-    free: true,
-    vision: false,
-  }),
-  model("laguna", "Laguna S 2.1 (free)", LAGUNA_MODEL_ID, LIMIT_256K, {
-    free: true,
-    vision: false,
-  }),
-  model(
-    "poolside/laguna-s-2.1-free",
-    "Laguna S 2.1 (free)",
-    LAGUNA_MODEL_ID,
-    LIMIT_256K,
-    { free: true, vision: false },
-  ),
-];
+export const GENERATED_VARIANT_KEYS = [
+  "none",
+  "minimal",
+  "low",
+  "medium",
+  "high",
+  "xhigh",
+  "max",
+] as const;
 
 /** Placeholder so OpenCode keeps the provider visible while logged out. */
 export const LOGIN_PLACEHOLDER_MODELS: CommandModel[] = [
@@ -72,64 +58,155 @@ export const LOGIN_PLACEHOLDER_MODELS: CommandModel[] = [
   },
 ];
 
-export const GENERATED_VARIANT_KEYS = [
-  "none",
-  "minimal",
-  "low",
-  "medium",
-  "high",
-  "xhigh",
-  "max",
-] as const;
+function metaToModel(meta: DiscoveredModelMeta): CommandModel {
+  return {
+    id: meta.id,
+    name: meta.name,
+    resolvedId: meta.id,
+    reasoning: meta.reasoning || meta.efforts.length > 0,
+    contextWindow: meta.contextWindow,
+    maxTokens: meta.maxTokens,
+    vision: meta.vision,
+    free: meta.free || undefined,
+    efforts: meta.efforts.length ? meta.efforts : undefined,
+  };
+}
+
+function withAliases(models: CommandModel[]): CommandModel[] {
+  const out: CommandModel[] = [];
+  const seen = new Set<string>();
+  const add = (m: CommandModel) => {
+    if (seen.has(m.id)) return;
+    seen.add(m.id);
+    out.push(m);
+  };
+
+  for (const m of models) add(m);
+
+  // Short name after last "/" — Command Code accepts these.
+  for (const m of models) {
+    if (!m.resolvedId.includes("/")) continue;
+    const short = m.resolvedId.slice(m.resolvedId.lastIndexOf("/") + 1);
+    if (!short || seen.has(short)) continue;
+    add({ ...m, id: short });
+  }
+
+  // Friendly Laguna aliases when that model is in the live catalog.
+  const laguna = models.find((m) => m.resolvedId === LAGUNA_MODEL_ID);
+  if (laguna) {
+    if (!seen.has(DEFAULT_MODEL_ID)) {
+      add({ ...laguna, id: DEFAULT_MODEL_ID, name: laguna.name });
+    }
+    if (!seen.has("laguna")) {
+      add({ ...laguna, id: "laguna", name: laguna.name });
+    }
+  }
+
+  // Put default / Laguna aliases first for nicer OpenCode menus.
+  out.sort((a, b) => {
+    const rank = (m: CommandModel) => {
+      if (m.id === DEFAULT_MODEL_ID) return 0;
+      if (m.id === "laguna") return 1;
+      if (m.resolvedId === LAGUNA_MODEL_ID) return 2;
+      if (m.free) return 3;
+      return 4;
+    };
+    return rank(a) - rank(b) || a.name.localeCompare(b.name);
+  });
+
+  return out;
+}
+
+export function invalidateCommandModelCache(): void {
+  cachedModels = null;
+  cachedAt = 0;
+}
+
+/** Force a fresh discovery from the Command Code CLI. */
+export function refreshCommandModels(): CommandModel[] {
+  const discovered = discoverCommandModels().map(metaToModel);
+  cachedModels = withAliases(discovered);
+  cachedAt = Date.now();
+  log.info("[opencode-commandcode] model catalog refreshed", {
+    count: cachedModels.length,
+  });
+  return cachedModels;
+}
+
+/**
+ * Live catalog (cached). Discovers via `cmd --list-models` on first use /
+ * after TTL expiry — never a hardcoded product list.
+ */
+export function getCommandModels(): CommandModel[] {
+  if (cachedModels && Date.now() - cachedAt < CATALOG_TTL_MS) {
+    return cachedModels;
+  }
+  return refreshCommandModels();
+}
+
+/** Snapshot alias used by older call sites / tests. */
+export function listCommandCodeModels(): CommandModel[] {
+  return getCommandModels();
+}
 
 export function isLoginPlaceholderModel(id: string): boolean {
   return id === "login";
 }
 
-export function getCommandModels(): CommandModel[] {
-  // Deduplicate by id while preferring shorter aliases first.
-  const seen = new Set<string>();
-  const out: CommandModel[] = [];
-  for (const m of COMMAND_CODE_MODELS) {
-    if (seen.has(m.id)) continue;
-    seen.add(m.id);
-    out.push(m);
-  }
-  return out;
-}
-
 export function resolveCommandModelId(modelId: string): string {
   const cleaned = modelId.replace(/^command-code\//, "").trim();
-  const match = COMMAND_CODE_MODELS.find(
+  if (!cleaned) return LAGUNA_MODEL_ID;
+
+  const models = getCommandModels();
+  const exact = models.find(
     (m) => m.id === cleaned || m.resolvedId === cleaned,
   );
-  if (match) return match.resolvedId;
-  // Accept short name after last slash.
+  if (exact) return exact.resolvedId;
+
   if (!cleaned.includes("/")) {
-    const bySuffix = COMMAND_CODE_MODELS.find((m) =>
-      m.resolvedId.endsWith(`/${cleaned}`),
+    const bySuffix = models.find((m) =>
+      m.resolvedId.toLowerCase().endsWith(`/${cleaned.toLowerCase()}`),
     );
     if (bySuffix) return bySuffix.resolvedId;
   }
-  return cleaned || LAGUNA_MODEL_ID;
+
+  // Case-insensitive full id match
+  const ci = models.find(
+    (m) => m.resolvedId.toLowerCase() === cleaned.toLowerCase(),
+  );
+  if (ci) return ci.resolvedId;
+
+  // Pass through unknown ids to the gateway (BYO / newly listed models).
+  return cleaned;
 }
 
 export function findCommandModel(modelId: string): CommandModel | undefined {
-  const resolved = resolveCommandModelId(modelId);
+  const cleaned = modelId.replace(/^command-code\//, "").trim();
+  const models = getCommandModels();
+  const resolved = resolveCommandModelId(cleaned);
   return (
-    COMMAND_CODE_MODELS.find((m) => m.id === modelId || m.resolvedId === resolved) ||
-    COMMAND_CODE_MODELS.find((m) => m.resolvedId === resolved)
+    models.find((m) => m.id === cleaned || m.resolvedId === cleaned) ||
+    models.find((m) => m.resolvedId === resolved) ||
+    models.find((m) => m.resolvedId.toLowerCase() === resolved.toLowerCase())
   );
 }
 
 export function buildEffortVariants(
   model: CommandModel,
 ): Record<string, { effort: CommandEffort } | { disabled: true }> {
-  if (!model.reasoning || isLoginPlaceholderModel(model.id)) return {};
+  if (isLoginPlaceholderModel(model.id)) return {};
+  const supported =
+    model.efforts && model.efforts.length > 0
+      ? model.efforts
+      : model.reasoning
+        ? [...EFFORT_LEVELS]
+        : [];
+  if (supported.length === 0) return {};
+
   const variants: Record<
     string,
     { effort: CommandEffort } | { disabled: true }
-  > = Object.fromEntries(EFFORT_LEVELS.map((effort) => [effort, { effort }]));
+  > = Object.fromEntries(supported.map((effort) => [effort, { effort }]));
   for (const key of GENERATED_VARIANT_KEYS) {
     if (!(key in variants)) variants[key] = { disabled: true };
   }

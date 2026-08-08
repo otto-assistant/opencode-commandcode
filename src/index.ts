@@ -1,10 +1,11 @@
 /**
  * OpenCode Command Code Auth Plugin
  *
- * Enables Command Code (Laguna S 2.1 free and gateway models) inside OpenCode via:
- * 1. Command Code Go-plan browser OAuth (`cmd login`) — no API key
+ * Enables Command Code models inside OpenCode via:
+ * 1. Go-plan browser OAuth, CLI session sync, or pasted API key
  * 2. Local OpenAI-compatible proxy → api.commandcode.ai /alpha/generate
- * 3. Tools/MCP park-resume, attachments, compact, and usage accounting
+ * 3. Dynamic model catalog from `cmd --list-models`
+ * 4. Tools/MCP park-resume, attachments, compact, and usage accounting
  *
  * Register in opencode.json:
  *   { "plugin": ["@otto-assistant/opencode-commandcode"] }
@@ -16,6 +17,8 @@ import {
   resetPendingCommandLogin,
   startCommandBrowserLogin,
   syncCommandCodeCredentialsToOpenCode,
+  validateCommandApiKey,
+  writeCommandCodeAuth,
 } from "./auth-login.js";
 import {
   DEFAULT_MODEL_ID,
@@ -33,6 +36,7 @@ import {
   buildConfigVariants,
   buildEffortVariants,
   getCommandModels,
+  refreshCommandModels,
   type CommandModel,
 } from "./models.js";
 import {
@@ -265,7 +269,7 @@ async function loadRuntime(
   provider?: { models?: Record<string, unknown> },
 ): Promise<{ port: number; providerModels: Record<string, unknown> } | undefined> {
   await resolveAccessToken(input, getAuth);
-  const models = getCommandModels();
+  const models = refreshCommandModels();
   await startProxy(async () => resolveAccessToken(input, getAuth));
   const providerModels = buildProviderModels(models);
   if (provider) provider.models = providerModels;
@@ -310,7 +314,8 @@ export const CommandCodePlugin: Plugin = async (
         return synced?.access ?? null;
       });
 
-      // Always seed Laguna catalog so the provider is discoverable pre-login.
+      // Always seed the live catalog so the provider is discoverable.
+      refreshCommandModels();
       ensureProviderConfig(config as Record<string, any>, getCommandModels());
     },
 
@@ -413,7 +418,7 @@ export const CommandCodePlugin: Plugin = async (
             return {
               url: current.url,
               instructions:
-                "Opens Command Code Studio CLI login (Go plan, $1/mo). Approve in the browser — session is posted back automatically. Laguna S 2.1 free costs $0 credits. No API key.",
+                "Opens Command Code Studio CLI login (Go plan, $1/mo). Approve in the browser — session is posted back automatically. Live models load from `cmd --list-models` after login.",
               method: "auto" as const,
               async callback() {
                 try {
@@ -443,7 +448,7 @@ export const CommandCodePlugin: Plugin = async (
             return {
               url: "https://commandcode.ai/docs/quickstart",
               instructions:
-                "If you already ran `npm i -g command-code@latest && cmd login` (Go $1 plan), click Complete to sync ~/.commandcode/auth.json. No API key.",
+                "If you already ran `npm i -g command-code@latest && cmd login` (Go $1 plan), click Complete to sync ~/.commandcode/auth.json.",
               method: "auto" as const,
               async callback() {
                 const again = syncCommandCodeCredentialsToOpenCode();
@@ -458,6 +463,43 @@ export const CommandCodePlugin: Plugin = async (
             };
           },
         },
+        {
+          type: "api",
+          label: "Enter Command Code API key",
+          prompts: [
+            {
+              type: "text",
+              key: "apiKey",
+              message: "Paste your Command Code API key / session token",
+              placeholder: "user_… or Studio key",
+              validate: (value) => {
+                if (!value || !value.trim()) return "API key is required";
+                if (value.trim().length < 16) return "Key looks too short";
+                return undefined;
+              },
+            },
+          ],
+          async authorize(inputs) {
+            const key = inputs?.apiKey?.trim() || inputs?.key?.trim() || "";
+            if (!key) return { type: "failed" as const };
+            const check = await validateCommandApiKey(key);
+            if (!check.valid) {
+              log.warn(
+                "[opencode-commandcode] API key validation failed",
+                check.error,
+              );
+              return { type: "failed" as const };
+            }
+            writeCommandCodeAuth({
+              key,
+              access: key,
+              refresh: "api-key",
+              expires: Date.now() + 1000 * 60 * 60 * 24 * 365,
+            });
+            refreshCommandModels();
+            return { type: "success" as const, key };
+          },
+        },
       ],
     },
   };
@@ -466,7 +508,12 @@ export const CommandCodePlugin: Plugin = async (
 export default CommandCodePlugin;
 
 export { detectCommandCode } from "./detect.js";
-export { getCommandModels, COMMAND_CODE_MODELS } from "./models.js";
+export {
+  getCommandModels,
+  listCommandCodeModels,
+  refreshCommandModels,
+  invalidateCommandModelCache,
+} from "./models.js";
 export {
   startProxy,
   stopProxy,
