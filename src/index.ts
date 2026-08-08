@@ -289,9 +289,7 @@ export const CommandCodePlugin: Plugin = async (
 
   return {
     async config(config) {
-      // Always seed Laguna catalog so the provider is discoverable pre-login.
-      ensureProviderConfig(config as Record<string, any>, getCommandModels());
-
+      // Bind proxy first so provider baseURL matches the actual listening port.
       await startProxy(async () => {
         try {
           const authClient = input.client.auth as {
@@ -311,6 +309,9 @@ export const CommandCodePlugin: Plugin = async (
         const synced = syncCommandCodeCredentialsToOpenCode();
         return synced?.access ?? null;
       });
+
+      // Always seed Laguna catalog so the provider is discoverable pre-login.
+      ensureProviderConfig(config as Record<string, any>, getCommandModels());
     },
 
     "chat.headers": async (hookInput, output) => {
