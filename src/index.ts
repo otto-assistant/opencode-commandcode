@@ -22,7 +22,6 @@ import {
   PROVIDER_ID,
   SESSION_HEADER,
 } from "./constants.js";
-import { detectCommandCode } from "./detect.js";
 import { log } from "./log.js";
 import {
   encodeCommandModelSelection,
