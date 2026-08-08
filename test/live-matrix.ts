@@ -202,9 +202,6 @@ const TOOL_MCPISH = {
 };
 
 async function main() {
-  // Keep live matrix off the default OpenCode proxy port (8797).
-  process.env.OPENCODE_COMMANDCODE_PROXY_PORT ||= "8798";
-
   const apiKey = requireAuth();
   setStreamGenerateForTests(null);
   resetUsageStore();

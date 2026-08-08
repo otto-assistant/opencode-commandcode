@@ -104,7 +104,7 @@ Laguna S 2.1 free requires an active Go (or higher) account with credits on file
 ```text
 OpenCode
   └─ /v1/chat/completions
-       └─ Bun.serve proxy (port 8797)
+       └─ Bun.serve proxy (dynamic port, prefer 8797)
             └─ POST https://api.commandcode.ai/alpha/generate
                  └─ poolside/laguna-s-2.1-free (default)
 ```
@@ -132,7 +132,7 @@ Debug logging: `OPENCODE_COMMANDCODE_DEBUG=1`.
 
 Optional knobs:
 
-- `OPENCODE_COMMANDCODE_PROXY_PORT` — fixed local proxy port (default `8797`; must match static config)
+- `OPENCODE_COMMANDCODE_PROXY_PORT` — pin a fixed local proxy port (otherwise dynamic: prefer `8797`, then scan upward / ephemeral)
 - `OPENCODE_COMMANDCODE_CWD` — working directory reported to the gateway
 - `COMMANDCODE_API_URL` / `OPENCODE_COMMANDCODE_API_URL` — override API base (default `https://api.commandcode.ai`)
 

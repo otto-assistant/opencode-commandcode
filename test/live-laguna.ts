@@ -71,9 +71,6 @@ function sseAssistantText(sse: string): string {
 }
 
 async function main() {
-  // Avoid colliding with an OpenCode CLI proxy already bound to :8797.
-  process.env.OPENCODE_COMMANDCODE_PROXY_PORT ||= "8798";
-
   const apiKey = requireAuth();
   setStreamGenerateForTests(null);
   resetUsageStore();
