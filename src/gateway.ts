@@ -2,6 +2,7 @@
  * Command Code gateway client — POST /alpha/generate NDJSON stream.
  */
 import { createHash, randomUUID } from "node:crypto";
+import { readdirSync } from "node:fs";
 import {
   GENERATE_ROUTE,
   emptyUsage,
@@ -83,12 +84,23 @@ export function buildAuthHeaders(auth: GatewayAuthHeaders): Record<string, strin
 export function buildGenerateBody(
   params: GatewayGenerateParams,
 ): GenerateBody {
+  const cwd = process.env.OPENCODE_COMMANDCODE_CWD || process.cwd();
+  let structure: string[] = [];
+  try {
+    structure = readdirSync(cwd)
+      .filter((name) => !name.startsWith("."))
+      .sort()
+      .slice(0, 200);
+  } catch {
+    structure = [];
+  }
+
   return {
     config: {
-      workingDir: process.env.OPENCODE_COMMANDCODE_CWD || process.cwd(),
+      workingDir: cwd,
       date: new Date().toISOString().slice(0, 10),
       environment: process.platform,
-      structure: "",
+      structure,
       isGitRepo: false,
       currentBranch: "",
       mainBranch: "",
@@ -100,7 +112,8 @@ export function buildGenerateBody(
     skills: null,
     permissionMode: params.permissionMode || "auto-accept",
     ...(params.threadId ? { threadId: params.threadId } : {}),
-    mode: "default",
+    // Feature mode — must be a gateway feature id, not "default".
+    mode: "agent",
     params: {
       model: params.model,
       messages: params.messages,

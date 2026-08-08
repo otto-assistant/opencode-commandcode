@@ -57,13 +57,33 @@ export type WireUsage = {
 };
 
 export type GenerateBody = {
-  config: Record<string, unknown>;
+  config: {
+    workingDir: string;
+    date: string;
+    environment: string;
+    structure: string[];
+    isGitRepo: boolean;
+    currentBranch: string;
+    mainBranch: string;
+    gitStatus: string;
+    recentCommits: string[];
+    [key: string]: unknown;
+  };
   memory: null;
   taste: null;
   skills: null;
   permissionMode: "standard" | "auto-accept" | "plan";
   threadId?: string;
-  mode?: string;
+  mode?:
+    | "agent"
+    | "learning"
+    | "custom-agent"
+    | "custom-agent-create"
+    | "title-gen"
+    | "tool-desc"
+    | "compact"
+    | "vision"
+    | string;
   params: {
     model: string;
     messages: WireMessage[];

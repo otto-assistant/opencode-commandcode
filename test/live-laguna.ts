@@ -29,8 +29,45 @@ function requireAuth(): string {
   return creds.apiKey;
 }
 
-async function readSseText(res: Response): Promise<string> {
-  return res.text();
+
+async function assertOk(res: Response, label: string): Promise<string> {
+  const text = await res.text();
+  if (res.status !== 200) {
+    throw new Error(`${label}: expected 200, got ${res.status}\n${text.slice(0, 2000)}`);
+  }
+  return text;
+}
+
+/** Concatenate streamed text/reasoning deltas from an OpenAI SSE body. */
+function sseAssistantText(sse: string): string {
+  let out = "";
+  for (const line of sse.split("\n")) {
+    if (!line.startsWith("data: ")) continue;
+    const raw = line.slice(6).trim();
+    if (!raw || raw === "[DONE]") continue;
+    try {
+      const chunk = JSON.parse(raw) as {
+        choices?: Array<{
+          delta?: { content?: string; reasoning_content?: string };
+          message?: { content?: string; reasoning_content?: string };
+        }>;
+      };
+      const choice = chunk.choices?.[0];
+      const delta = choice?.delta;
+      const message = choice?.message;
+      if (typeof delta?.content === "string") out += delta.content;
+      if (typeof delta?.reasoning_content === "string") {
+        out += delta.reasoning_content;
+      }
+      if (typeof message?.content === "string") out += message.content;
+      if (typeof message?.reasoning_content === "string") {
+        out += message.reasoning_content;
+      }
+    } catch {
+      // ignore non-JSON keepalives
+    }
+  }
+  return out;
 }
 
 async function main() {
@@ -63,9 +100,9 @@ async function main() {
         ],
       }),
     });
-    assert.equal(res.status, 200, await res.text());
-    const text = await readSseText(res);
-    assert.ok(/Laguna live ok/i.test(text), text.slice(0, 2000));
+    const text = await assertOk(res, "plain");
+    const assistant = sseAssistantText(text);
+    assert.ok(/Laguna live ok/i.test(assistant), assistant || text.slice(0, 2000));
     assert.ok(text.includes("usage"), "expected usage in stream");
     console.log("✓ live plain completion");
   }
@@ -108,8 +145,8 @@ async function main() {
         ],
       }),
     });
-    assert.equal(res.status, 200, await res.text());
-    const json = (await res.json()) as {
+    const raw = await assertOk(res, "attachments");
+    const json = JSON.parse(raw) as {
       choices: Array<{ message: { content: string } }>;
       usage?: { prompt_tokens: number };
     };
@@ -159,8 +196,7 @@ async function main() {
         tools,
       }),
     });
-    assert.equal(res1.status, 200, await res1.text());
-    const turn1 = await readSseText(res1);
+    const turn1 = await assertOk(res1, "tools-turn1");
     assert.ok(
       turn1.includes("add_numbers") || turn1.includes("tool_calls"),
       turn1.slice(0, 2500),
@@ -202,7 +238,6 @@ async function main() {
       } catch {
         parsed = {};
       }
-      // args may have been streamed in pieces — try to find numbers in the SSE
       if (typeof parsed.a !== "number") {
         const m = turn1.match(/"a"\s*:\s*(\d+)/);
         const n = turn1.match(/"b"\s*:\s*(\d+)/);
@@ -254,9 +289,9 @@ async function main() {
           tools,
         }),
       });
-      assert.equal(res2.status, 200, await res2.text());
-      const turn2 = await readSseText(res2);
-      assert.ok(/42/.test(turn2), turn2.slice(0, 2000));
+      const turn2 = await assertOk(res2, "tools-turn2");
+      const assistant2 = sseAssistantText(turn2);
+      assert.ok(/42/.test(assistant2) || /42/.test(turn2), assistant2 || turn2.slice(0, 2000));
       console.log("✓ live tools park/resume");
     }
   }
@@ -264,8 +299,8 @@ async function main() {
   // 4) Usage totals
   {
     const res = await fetch(`${base}/v1/usage`);
-    assert.equal(res.status, 200);
-    const json = (await res.json()) as {
+    const raw = await assertOk(res, "usage");
+    const json = JSON.parse(raw) as {
       total: { prompt_tokens: number; completion_tokens: number };
       sessions: Array<{ tools: unknown[]; contextWindow: number }>;
     };
@@ -295,8 +330,8 @@ async function main() {
         ],
       }),
     });
-    assert.equal(res.status, 200, await res.text());
-    const json = (await res.json()) as {
+    const raw = await assertOk(res, "compact");
+    const json = JSON.parse(raw) as {
       choices: Array<{ message: { content?: string; reasoning_content?: string } }>;
     };
     const content =
