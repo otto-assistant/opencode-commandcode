@@ -52,13 +52,13 @@ import {
 const DEFAULT_PROXY_PORT = 8797;
 const SHARED_PROXY_HEALTH_TIMEOUT_MS = 750;
 
-const COMMAND_PROXY_PORT: number = (() => {
+function configuredProxyPort(): number {
   const raw = process.env.OPENCODE_COMMANDCODE_PROXY_PORT;
   const parsed = raw ? Number(raw) : NaN;
   return Number.isInteger(parsed) && parsed > 0 && parsed < 65536
     ? parsed
     : DEFAULT_PROXY_PORT;
-})();
+}
 
 const SSE_HEADERS = {
   "Content-Type": "text/event-stream",
@@ -93,11 +93,11 @@ export function setStreamGenerateForTests(
 }
 
 export function getCommandProxyBaseUrl(): string {
-  return `http://127.0.0.1:${COMMAND_PROXY_PORT}/v1`;
+  return `http://127.0.0.1:${proxyPort ?? configuredProxyPort()}/v1`;
 }
 
 export function getProxyPort(): number | null {
-  return proxyPort ?? COMMAND_PROXY_PORT;
+  return proxyPort ?? configuredProxyPort();
 }
 
 function isAddrInUseError(err: unknown): boolean {
@@ -118,9 +118,12 @@ async function isSharedProxyHealthy(): Promise<boolean> {
     SHARED_PROXY_HEALTH_TIMEOUT_MS,
   );
   try {
-    const res = await fetch(`${getCommandProxyBaseUrl()}/models`, {
-      signal: controller.signal,
-    });
+    const res = await fetch(
+      `http://127.0.0.1:${configuredProxyPort()}/v1/models`,
+      {
+        signal: controller.signal,
+      },
+    );
     if (!res.ok) return false;
     const body = (await res.json().catch(() => undefined)) as
       | { object?: unknown; data?: unknown }
@@ -137,8 +140,10 @@ export async function startProxy(tokenProvider: TokenProvider): Promise<number> 
   getAccessToken = tokenProvider;
   if (server && proxyPort) return proxyPort;
 
+  const desiredPort = configuredProxyPort();
+
   if (await isSharedProxyHealthy()) {
-    proxyPort = COMMAND_PROXY_PORT;
+    proxyPort = desiredPort;
     log.info(
       `[opencode-commandcode] reusing healthy proxy on ${getCommandProxyBaseUrl()}`,
     );
@@ -149,21 +154,21 @@ export async function startProxy(tokenProvider: TokenProvider): Promise<number> 
   try {
     server = Bun.serve({
       hostname,
-      port: COMMAND_PROXY_PORT,
+      port: desiredPort,
       async fetch(req) {
         return handleRequest(req);
       },
     });
-    proxyPort = server.port ?? COMMAND_PROXY_PORT;
+    proxyPort = server.port ?? desiredPort;
     log.info(
       `[opencode-commandcode] proxy listening on ${getCommandProxyBaseUrl()}`,
     );
     return proxyPort;
   } catch (err) {
     if (isAddrInUseError(err) && (await isSharedProxyHealthy())) {
-      proxyPort = COMMAND_PROXY_PORT;
+      proxyPort = desiredPort;
       log.info(
-        `[opencode-commandcode] port ${COMMAND_PROXY_PORT} in use; reusing existing proxy`,
+        `[opencode-commandcode] port ${desiredPort} in use; reusing existing proxy`,
       );
       return proxyPort;
     }
