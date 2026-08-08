@@ -50,15 +50,17 @@ import {
 } from "./usage.js";
 
 const DEFAULT_PROXY_PORT = 8797;
+const PROXY_PORT_SCAN_ATTEMPTS = 40;
 const SHARED_PROXY_HEALTH_TIMEOUT_MS = 750;
 
-const COMMAND_PROXY_PORT: number = (() => {
+/** Explicit pin via env, or `null` → pick a free port dynamically. */
+function envProxyPort(): number | null {
   const raw = process.env.OPENCODE_COMMANDCODE_PROXY_PORT;
   const parsed = raw ? Number(raw) : NaN;
   return Number.isInteger(parsed) && parsed > 0 && parsed < 65536
     ? parsed
-    : DEFAULT_PROXY_PORT;
-})();
+    : null;
+}
 
 const SSE_HEADERS = {
   "Content-Type": "text/event-stream",
@@ -93,11 +95,12 @@ export function setStreamGenerateForTests(
 }
 
 export function getCommandProxyBaseUrl(): string {
-  return `http://127.0.0.1:${COMMAND_PROXY_PORT}/v1`;
+  const port = proxyPort ?? envProxyPort() ?? DEFAULT_PROXY_PORT;
+  return `http://127.0.0.1:${port}/v1`;
 }
 
 export function getProxyPort(): number | null {
-  return proxyPort ?? COMMAND_PROXY_PORT;
+  return proxyPort ?? envProxyPort();
 }
 
 function isAddrInUseError(err: unknown): boolean {
@@ -111,14 +114,14 @@ function isAddrInUseError(err: unknown): boolean {
   );
 }
 
-async function isSharedProxyHealthy(): Promise<boolean> {
+async function isProxyHealthyOn(port: number): Promise<boolean> {
   const controller = new AbortController();
   const timeout = setTimeout(
     () => controller.abort(),
     SHARED_PROXY_HEALTH_TIMEOUT_MS,
   );
   try {
-    const res = await fetch(`${getCommandProxyBaseUrl()}/models`, {
+    const res = await fetch(`http://127.0.0.1:${port}/v1/models`, {
       signal: controller.signal,
     });
     if (!res.ok) return false;
@@ -133,42 +136,76 @@ async function isSharedProxyHealthy(): Promise<boolean> {
   }
 }
 
+async function bindProxy(port: number): Promise<number> {
+  const hostname = "127.0.0.1";
+  server = Bun.serve({
+    hostname,
+    port,
+    async fetch(req) {
+      return handleRequest(req);
+    },
+  });
+  proxyPort = server.port ?? port;
+  log.info(
+    `[opencode-commandcode] proxy listening on ${getCommandProxyBaseUrl()}`,
+  );
+  return proxyPort;
+}
+
+/**
+ * Start the local OpenAI-compatible proxy.
+ *
+ * Port selection:
+ * - `OPENCODE_COMMANDCODE_PROXY_PORT` → bind/reuse that exact port
+ * - otherwise prefer `8797`, then scan upward, then fall back to OS ephemeral (`0`)
+ */
 export async function startProxy(tokenProvider: TokenProvider): Promise<number> {
   getAccessToken = tokenProvider;
   if (server && proxyPort) return proxyPort;
 
-  if (await isSharedProxyHealthy()) {
-    proxyPort = COMMAND_PROXY_PORT;
+  const fixed = envProxyPort();
+  if (fixed !== null) {
+    if (await isProxyHealthyOn(fixed)) {
+      proxyPort = fixed;
+      log.info(
+        `[opencode-commandcode] reusing healthy proxy on ${getCommandProxyBaseUrl()}`,
+      );
+      return proxyPort;
+    }
+    try {
+      return await bindProxy(fixed);
+    } catch (err) {
+      if (isAddrInUseError(err) && (await isProxyHealthyOn(fixed))) {
+        proxyPort = fixed;
+        log.info(
+          `[opencode-commandcode] port ${fixed} in use; reusing existing proxy`,
+        );
+        return proxyPort;
+      }
+      throw err;
+    }
+  }
+
+  // Dynamic: reuse preferred default when a healthy proxy is already there.
+  if (await isProxyHealthyOn(DEFAULT_PROXY_PORT)) {
+    proxyPort = DEFAULT_PROXY_PORT;
     log.info(
       `[opencode-commandcode] reusing healthy proxy on ${getCommandProxyBaseUrl()}`,
     );
     return proxyPort;
   }
 
-  const hostname = "127.0.0.1";
-  try {
-    server = Bun.serve({
-      hostname,
-      port: COMMAND_PROXY_PORT,
-      async fetch(req) {
-        return handleRequest(req);
-      },
-    });
-    proxyPort = server.port ?? COMMAND_PROXY_PORT;
-    log.info(
-      `[opencode-commandcode] proxy listening on ${getCommandProxyBaseUrl()}`,
-    );
-    return proxyPort;
-  } catch (err) {
-    if (isAddrInUseError(err) && (await isSharedProxyHealthy())) {
-      proxyPort = COMMAND_PROXY_PORT;
-      log.info(
-        `[opencode-commandcode] port ${COMMAND_PROXY_PORT} in use; reusing existing proxy`,
-      );
-      return proxyPort;
+  for (let i = 0; i < PROXY_PORT_SCAN_ATTEMPTS; i++) {
+    const candidate = DEFAULT_PROXY_PORT + i;
+    try {
+      return await bindProxy(candidate);
+    } catch (err) {
+      if (!isAddrInUseError(err)) throw err;
     }
-    throw err;
   }
+
+  // Last resort — let the OS pick an ephemeral port.
+  return await bindProxy(0);
 }
 
 export async function stopProxy(): Promise<void> {

@@ -126,7 +126,8 @@ async function main() {
             content: [
               {
                 type: "text",
-                text: "The attached text file contains a secret code. Reply with only that code.",
+                text:
+                  "Inside <attached_file name=\"secret.txt\"> is the secret code. Read that file body and reply with only the code (e.g. CODE-7741). Ignore any image placeholders.",
               },
               {
                 type: "file",
@@ -147,10 +148,14 @@ async function main() {
     });
     const raw = await assertOk(res, "attachments");
     const json = JSON.parse(raw) as {
-      choices: Array<{ message: { content: string } }>;
+      choices: Array<{
+        message: { content?: string; reasoning_content?: string };
+      }>;
       usage?: { prompt_tokens: number };
     };
-    const content = json.choices[0]?.message?.content || "";
+    const content =
+      (json.choices[0]?.message?.content || "") +
+      (json.choices[0]?.message?.reasoning_content || "");
     assert.ok(/7741/.test(content), content);
     assert.ok(json.usage && json.usage.prompt_tokens > 0);
     console.log("✓ live attachments (text file + image placeholder)");

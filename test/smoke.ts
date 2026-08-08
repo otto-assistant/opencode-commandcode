@@ -596,6 +596,30 @@ async function main() {
 
   await stopProxy();
 
+  // Dynamic port: when preferred 8797 is occupied by a non-proxy listener,
+  // startProxy must bind another free port (not fail).
+  {
+    delete process.env.OPENCODE_COMMANDCODE_PROXY_PORT;
+    const blocker = Bun.serve({
+      hostname: "127.0.0.1",
+      port: 8797,
+      fetch() {
+        return new Response("blocked");
+      },
+    });
+    try {
+      const dynPort = await startProxy(async () => "test-api-key");
+      assert.ok(dynPort > 0);
+      assert.notEqual(dynPort, 8797);
+      assert.ok(getCommandProxyBaseUrl().includes(String(dynPort)));
+      const healthDyn = await fetch(`http://127.0.0.1:${dynPort}/health`);
+      assert.equal(healthDyn.status, 200);
+      await stopProxy();
+    } finally {
+      blocker.stop(true);
+    }
+  }
+
   // TypeScript build
   const build = spawnSync("bun", ["run", "build"], {
     cwd: new URL("..", import.meta.url).pathname,
