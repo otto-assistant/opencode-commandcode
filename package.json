@@ -1,0 +1,63 @@
+{
+  "name": "@otto-assistant/opencode-commandcode",
+  "version": "0.1.0",
+  "description": "Command Code in OpenCode — CLI auth sync, gateway proxy, Laguna S 2.1, tools/MCP, attachments, compact, usage.",
+  "license": "MIT",
+  "type": "module",
+  "main": "./opencode-commandcode.js",
+  "module": "./opencode-commandcode.js",
+  "types": "./dist/index.d.ts",
+  "exports": {
+    ".": {
+      "types": "./dist/index.d.ts",
+      "import": "./opencode-commandcode.js",
+      "default": "./opencode-commandcode.js"
+    }
+  },
+  "files": [
+    "dist",
+    "opencode-commandcode.js"
+  ],
+  "scripts": {
+    "build": "tsc -p tsconfig.json",
+    "test": "bun test/smoke.ts",
+    "test:live": "bun test/live-laguna.ts",
+    "prepublishOnly": "npm run build"
+  },
+  "repository": {
+    "type": "git",
+    "url": "git+https://github.com/otto-assistant/opencode-commandcode.git"
+  },
+  "homepage": "https://www.npmjs.com/package/@otto-assistant/opencode-commandcode",
+  "bugs": {
+    "url": "https://github.com/otto-assistant/opencode-commandcode/issues"
+  },
+  "keywords": [
+    "opencode",
+    "opencode-plugin",
+    "command-code",
+    "commandcode",
+    "laguna",
+    "poolside",
+    "oauth",
+    "openai-compatible",
+    "ai",
+    "llm",
+    "streaming",
+    "agent"
+  ],
+  "engines": {
+    "node": ">=18"
+  },
+  "publishConfig": {
+    "access": "public"
+  },
+  "dependencies": {
+    "@opencode-ai/plugin": "^1.18.15"
+  },
+  "devDependencies": {
+    "@types/bun": "^1.3.11",
+    "@types/node": "^22.15.0",
+    "typescript": "^5.9.3"
+  }
+}
