@@ -1,6 +1,7 @@
 /**
  * Live Laguna S 2.1 tests against api.commandcode.ai.
- * Requires COMMAND_CODE_API_KEY (or ~/.commandcode/auth.json from `cmd login`).
+ * Requires a Go-plan ($1) session from `cmd login` (~/.commandcode/auth.json).
+ * No Studio API key.
  *
  *   bun run test:live
  */
@@ -18,7 +19,10 @@ function requireAuth(): string {
   const creds = readCommandCodeCredentials();
   if (!creds?.apiKey) {
     console.error(
-      "Skipping live tests: set COMMAND_CODE_API_KEY or run `cmd login`.",
+      "Skipping live tests: run `cmd login` with a Command Code Go ($1) plan session.",
+    );
+    console.error(
+      "No API key needed — browser OAuth writes ~/.commandcode/auth.json.",
     );
     process.exit(0);
   }

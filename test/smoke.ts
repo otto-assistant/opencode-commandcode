@@ -34,6 +34,11 @@ async function main() {
   } = await import("../src/constants.ts");
   const { CommandCodePlugin } = await import("../src/index.ts");
   const {
+    buildCommandAuthUrl,
+    startCommandBrowserLogin,
+    resetPendingCommandLogin,
+  } = await import("../src/auth-login.ts");
+  const {
     startProxy,
     stopProxy,
     getProxyPort,
@@ -321,6 +326,17 @@ async function main() {
       detection.status === "needs-login" ||
       detection.status === "missing-cli",
   );
+
+  // --- Go-plan browser OAuth URL (same as cmd login) ---
+  const authUrl = buildCommandAuthUrl(5959, "test-state");
+  assert.ok(authUrl.includes("commandcode.ai/studio/auth/cli"));
+  assert.ok(authUrl.includes("callback="));
+  assert.ok(authUrl.includes("state=test-state"));
+
+  const pendingLogin = await startCommandBrowserLogin();
+  assert.ok(pendingLogin.url.includes("/studio/auth/cli"));
+  assert.ok(pendingLogin.port >= 5959);
+  resetPendingCommandLogin();
 
   // --- plugin export ---
   assert.equal(typeof CommandCodePlugin, "function");

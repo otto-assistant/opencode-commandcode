@@ -2,7 +2,7 @@
  * OpenCode Command Code Auth Plugin
  *
  * Enables Command Code (Laguna S 2.1 free and gateway models) inside OpenCode via:
- * 1. Command Code CLI credential sync or API key auth
+ * 1. Command Code Go-plan browser OAuth (`cmd login`) — no API key
  * 2. Local OpenAI-compatible proxy → api.commandcode.ai /alpha/generate
  * 3. Tools/MCP park-resume, attachments, compact, and usage accounting
  *
@@ -11,9 +11,11 @@
  */
 import type { Hooks, Plugin, PluginInput } from "@opencode-ai/plugin";
 import {
+  completeCommandBrowserLogin,
+  getPendingCommandLogin,
+  resetPendingCommandLogin,
+  startCommandBrowserLogin,
   syncCommandCodeCredentialsToOpenCode,
-  validateCommandApiKey,
-  writeCommandCodeAuth,
 } from "./auth-login.js";
 import {
   DEFAULT_MODEL_ID,
@@ -381,69 +383,78 @@ export const CommandCodePlugin: Plugin = async (
       methods: [
         {
           type: "oauth",
-          label: "Use Command Code CLI login",
+          label: "Login with Command Code (Go $1)",
           async authorize() {
+            // Prefer already-logged-in CLI session from `cmd login`.
             const synced = syncCommandCodeCredentialsToOpenCode();
             if (synced) {
               return {
-                url: "https://commandcode.ai/docs/quickstart",
+                url: "https://commandcode.ai/docs/plans/go",
                 instructions:
-                  "Command Code CLI credentials were found and synced. Click Complete to finish.",
+                  "Command Code Go-plan session found (from `cmd login`). Click Complete — no API key needed.",
                 method: "auto" as const,
                 async callback() {
                   return {
                     type: "success" as const,
-                    key: synced.key || synced.access,
+                    refresh: synced.refresh,
+                    access: synced.access,
+                    expires: synced.expires,
                   };
                 },
               };
             }
 
+            let current = getPendingCommandLogin();
+            if (!current || current.completed) {
+              current = await startCommandBrowserLogin();
+            }
+
+            return {
+              url: current.url,
+              instructions:
+                "Opens Command Code Studio CLI login (Go plan, $1/mo). Approve in the browser — session is posted back automatically. Laguna S 2.1 free costs $0 credits. No API key.",
+              method: "auto" as const,
+              async callback() {
+                try {
+                  const tokens = await completeCommandBrowserLogin();
+                  return {
+                    type: "success" as const,
+                    refresh: tokens.refresh,
+                    access: tokens.access,
+                    expires: tokens.expires,
+                  };
+                } catch (err) {
+                  resetPendingCommandLogin();
+                  log.error(
+                    "[opencode-commandcode] Go-plan OAuth failed",
+                    err instanceof Error ? err.message : err,
+                  );
+                  return { type: "failed" as const };
+                }
+              },
+            };
+          },
+        },
+        {
+          type: "oauth",
+          label: "Use existing `cmd login` session",
+          async authorize() {
             return {
               url: "https://commandcode.ai/docs/quickstart",
               instructions:
-                "Run `npm i -g command-code@latest && cmd login` in a terminal, then click Complete. Or choose API key instead.",
+                "If you already ran `npm i -g command-code@latest && cmd login` (Go $1 plan), click Complete to sync ~/.commandcode/auth.json. No API key.",
               method: "auto" as const,
               async callback() {
                 const again = syncCommandCodeCredentialsToOpenCode();
                 if (!again) return { type: "failed" as const };
                 return {
                   type: "success" as const,
-                  key: again.key || again.access,
+                  refresh: again.refresh,
+                  access: again.access,
+                  expires: again.expires,
                 };
               },
             };
-          },
-        },
-        {
-          type: "api",
-          label: "Command Code API key",
-          prompts: [
-            {
-              type: "text",
-              key: "apiKey",
-              message: "Paste your Command Code API key",
-              placeholder: "from Studio → Settings, or COMMAND_CODE_API_KEY",
-            },
-          ],
-          async authorize(inputs) {
-            const key = (inputs?.apiKey || inputs?.key || "").trim();
-            if (!key) return { type: "failed" as const };
-            const validated = await validateCommandApiKey(key);
-            if (!validated.valid) {
-              log.error(
-                "[opencode-commandcode] API key validation failed",
-                validated.error,
-              );
-              return { type: "failed" as const };
-            }
-            writeCommandCodeAuth({
-              access: key,
-              refresh: "api-key",
-              expires: Date.now() + 365 * 24 * 60 * 60 * 1000,
-              key,
-            });
-            return { type: "success" as const, key };
           },
         },
       ],

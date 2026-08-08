@@ -1,7 +1,7 @@
 {
   "name": "@otto-assistant/opencode-commandcode",
   "version": "0.1.0",
-  "description": "Command Code in OpenCode — CLI auth sync, gateway proxy, Laguna S 2.1, tools/MCP, attachments, compact, usage.",
+  "description": "Command Code in OpenCode — Go-plan ($1) browser OAuth, gateway proxy, Laguna S 2.1, tools/MCP, attachments, compact, usage.",
   "license": "MIT",
   "type": "module",
   "main": "./opencode-commandcode.js",

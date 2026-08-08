@@ -9,7 +9,7 @@
 </p>
 
 <p align="center">
-  <strong>Command Code inside OpenCode</strong> — CLI/API-key auth,<br>
+  <strong>Command Code inside OpenCode</strong> — Go-plan ($1) browser login,<br>
   gateway proxy, free Laguna S 2.1, tools/MCP, attachments, compact, usage.
 </p>
 
@@ -52,16 +52,15 @@ opencode plugin file://$PWD
 
 ## Authenticate
 
-Requires [Command Code CLI](https://commandcode.ai/docs/quickstart) and a free account:
+Uses the **Command Code Go plan ($1/mo)** — same browser login as `cmd login`. No Studio API key.
 
 ```bash
 npm i -g command-code@latest
-cmd login
-opencode auth login --provider command-code
-# pick "Use Command Code CLI login"  — or paste an API key
-```
+cmd login   # browser → Studio CLI auth (Go plan). Laguna S 2.1 is $0 credits.
 
-Env alternative: `COMMAND_CODE_API_KEY`.
+opencode auth login --provider command-code
+# pick "Login with Command Code (Go $1)"  — or "Use existing cmd login session"
+```
 
 Then:
 
@@ -69,13 +68,15 @@ Then:
 opencode run "Summarise this repository in five bullets." --model command-code/laguna-s-2.1-free
 ```
 
+Laguna S 2.1 free requires an active Go (or higher) account with credits on file; requests on that model still bill **$0**.
+
 ## Why this plugin
 
 | | |
 |---|---|
 | **Gateway proxy** | Talks to `api.commandcode.ai/alpha/generate` — same transport as the `cmd` CLI. |
 | **Laguna S 2.1 free** | 256k context, reasoning, $0 while the deal lasts. |
-| **CLI / API auth** | Syncs `~/.commandcode/auth.json` or accepts `COMMAND_CODE_API_KEY`. |
+| **Go-plan auth** | Browser OAuth like `cmd login` ($1/mo). Syncs `~/.commandcode/auth.json`. No API key. |
 | **Agent-grade tools** | OpenCode tool calls park and resume; MCP-prefixed tools are tracked separately. |
 | **Attachments** | Images, PDFs, text/binary files from OpenCode. Text-only models get image placeholders (Command Code behavior). |
 | **Compact** | Context-fraction tips + tiered client compact before the 256k window overflows. |
@@ -103,7 +104,7 @@ OpenCode
 bun install
 bun run build
 bun run test          # mocked gateway — attachments, tools, compact, usage
-bun run test:live     # live Laguna S 2.1 (needs COMMAND_CODE_API_KEY)
+bun run test:live     # live Laguna S 2.1 (needs `cmd login` / Go plan session)
 ```
 
 Debug: `OPENCODE_COMMANDCODE_DEBUG=1`.
@@ -112,7 +113,6 @@ Optional knobs:
 
 - `OPENCODE_COMMANDCODE_PROXY_PORT` — fixed local proxy port (default `8797`)
 - `OPENCODE_COMMANDCODE_CWD` — working directory reported to the gateway
-- `COMMAND_CODE_API_KEY` — API key without CLI login
 - `COMMANDCODE_API_URL` — override API base (default `https://api.commandcode.ai`)
 
 ## License
