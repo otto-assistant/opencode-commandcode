@@ -3,8 +3,9 @@
  *
  * Browser flow matches `cmd login`:
  *   https://commandcode.ai/studio/auth/cli?callback=http://localhost:PORT/callback&state=STATE
- * Studio POSTs { apiKey, userId, userName, keyName, state } to the local callback.
- * That session credential is what the $1 Go plan uses — no Studio API key needed.
+ * Studio POSTs { apiKey, userId, userName, keyName, state } to the local callback when
+ * reachable. If the POST fails, Studio shows the key to copy — paste it into OpenCode
+ * (`method: "code"`), same as the CLI's "Paste your API key..." field.
  */
 import { createServer, type Server } from "node:http";
 import { randomBytes } from "node:crypto";
@@ -58,12 +59,14 @@ const ALLOWED_CORS = [
   "http://localhost:3000",
   "https://staging.commandcode.ai",
   "https://commandcode.ai",
+  "https://www.commandcode.ai",
 ];
 
 let pending: PendingCommandLogin | null = null;
 let authServer: Server | null = null;
 let waitForCallback: Promise<BrowserCallbackPayload> | null = null;
 let rejectCallback: ((err: Error) => void) | null = null;
+let receivedPayload: BrowserCallbackPayload | null = null;
 
 function authJsonPath(): string {
   const xdg = process.env.XDG_DATA_HOME;
@@ -218,6 +221,23 @@ export function resetPendingCommandLogin(): void {
   pending = null;
   waitForCallback = null;
   rejectCallback = null;
+  receivedPayload = null;
+}
+
+function payloadToTokens(payload: BrowserCallbackPayload): CommandCodeAuthTokens {
+  return {
+    access: payload.apiKey,
+    key: payload.apiKey,
+    refresh: "browser-oauth",
+    expires: Date.now() + 365 * 24 * 60 * 60 * 1000,
+    userId: payload.userId,
+    userName: payload.userName,
+    keyName: payload.keyName,
+  };
+}
+
+function sanitizeApiKeyInput(value: string): string {
+  return value.trim().replace(/^["']|["']$/g, "");
 }
 
 function stopAuthServer(): void {
@@ -307,10 +327,14 @@ export async function startCommandBrowserLogin(): Promise<PendingCommandLogin> {
     const allow =
       typeof origin === "string" && ALLOWED_CORS.includes(origin)
         ? origin
-        : ALLOWED_CORS[0];
+        : origin && origin.endsWith("commandcode.ai")
+          ? origin
+          : ALLOWED_CORS[2]; // https://commandcode.ai
     res.setHeader("Access-Control-Allow-Origin", allow);
     res.setHeader("Access-Control-Allow-Methods", "POST, OPTIONS");
     res.setHeader("Access-Control-Allow-Headers", "Content-Type");
+    // Chrome Private Network Access: public site → localhost callback.
+    res.setHeader("Access-Control-Allow-Private-Network", "true");
     res.setHeader("Content-Type", "application/json");
 
     if (req.method === "OPTIONS") {
@@ -375,6 +399,8 @@ export async function startCommandBrowserLogin(): Promise<PendingCommandLogin> {
         }
         res.writeHead(200);
         res.end(JSON.stringify({ success: true }));
+        receivedPayload = parsed;
+        if (pending) pending.completed = true;
         resolveCb(parsed);
         stopAuthServer();
       } catch {
@@ -411,15 +437,8 @@ export async function completeCommandBrowserLogin(): Promise<CommandCodeAuthToke
 
   try {
     const payload = await Promise.race([waitForCallback, timeout]);
-    const tokens: CommandCodeAuthTokens = {
-      access: payload.apiKey,
-      key: payload.apiKey,
-      refresh: "browser-oauth",
-      expires: Date.now() + 365 * 24 * 60 * 60 * 1000,
-      userId: payload.userId,
-      userName: payload.userName,
-      keyName: payload.keyName,
-    };
+    receivedPayload = payload;
+    const tokens = payloadToTokens(payload);
     writeCommandCodeAuth(tokens);
     if (pending) pending.completed = true;
     return tokens;
@@ -430,4 +449,84 @@ export async function completeCommandBrowserLogin(): Promise<CommandCodeAuthToke
     resetPendingCommandLogin();
     throw err;
   }
+}
+
+/**
+ * Finish login the way `cmd login` does after Studio confirms:
+ * prefer a key already POSTed to the local callback; otherwise accept the
+ * API key the user pasted from Studio's fallback / copy page.
+ */
+export async function completeCommandLoginWithCode(
+  code: string,
+): Promise<CommandCodeAuthTokens> {
+  if (receivedPayload?.apiKey) {
+    const tokens = payloadToTokens(receivedPayload);
+    writeCommandCodeAuth(tokens);
+    if (pending) pending.completed = true;
+    stopAuthServer();
+    waitForCallback = null;
+    rejectCallback = null;
+    return tokens;
+  }
+
+  // Tiny grace period: Studio may still be POSTing while the user pastes "ok".
+  if (waitForCallback) {
+    const raced = await Promise.race([
+      waitForCallback.then((payload) => ({ ok: true as const, payload })),
+      new Promise<{ ok: false }>((resolve) =>
+        setTimeout(() => resolve({ ok: false }), 750),
+      ),
+    ]);
+    if (raced.ok) {
+      receivedPayload = raced.payload;
+      const tokens = payloadToTokens(raced.payload);
+      writeCommandCodeAuth(tokens);
+      if (pending) pending.completed = true;
+      stopAuthServer();
+      waitForCallback = null;
+      rejectCallback = null;
+      return tokens;
+    }
+  }
+
+  const key = sanitizeApiKeyInput(code);
+  // OpenCode "code" flow: if the browser already succeeded, user may paste "ok".
+  if (!key || /^(ok|done|success|yes)$/i.test(key)) {
+    if (receivedPayload?.apiKey) {
+      const tokens = payloadToTokens(receivedPayload);
+      writeCommandCodeAuth(tokens);
+      resetPendingCommandLogin();
+      return tokens;
+    }
+    if (!key) {
+      throw new Error(
+        "Paste the API key from Command Code Studio (shown after Authorize).",
+      );
+    }
+    throw new Error(
+      "No session received yet. Paste the API key shown on the Studio page.",
+    );
+  }
+
+  const check = await validateCommandApiKey(key);
+  if (!check.valid) {
+    throw new Error(
+      check.error === "invalid_key"
+        ? "Invalid API key — copy the key from Studio and try again."
+        : `Could not validate API key (${check.error ?? "unknown"}).`,
+    );
+  }
+
+  const tokens: CommandCodeAuthTokens = {
+    access: key,
+    key,
+    refresh: "browser-oauth-paste",
+    expires: Date.now() + 365 * 24 * 60 * 60 * 1000,
+    userName: check.userName,
+    keyName: "opencode-oauth",
+  };
+  writeCommandCodeAuth(tokens);
+  if (pending) pending.completed = true;
+  resetPendingCommandLogin();
+  return tokens;
 }

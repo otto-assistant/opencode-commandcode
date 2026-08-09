@@ -2,7 +2,7 @@
  * OpenCode Command Code Auth Plugin
  *
  * Enables Command Code models inside OpenCode via:
- * 1. Go-plan browser OAuth, CLI session sync, or pasted API key
+ * 1. Go-plan browser login (`cmd login` style: open URL, then paste the key)
  * 2. Local OpenAI-compatible proxy → api.commandcode.ai /alpha/generate
  * 3. Dynamic model catalog from `cmd --list-models`
  * 4. Tools/MCP park-resume, attachments, compact, and usage accounting
@@ -12,13 +12,11 @@
  */
 import type { Hooks, Plugin, PluginInput } from "@opencode-ai/plugin";
 import {
-  completeCommandBrowserLogin,
+  completeCommandLoginWithCode,
   getPendingCommandLogin,
   resetPendingCommandLogin,
   startCommandBrowserLogin,
   syncCommandCodeCredentialsToOpenCode,
-  validateCommandApiKey,
-  writeCommandCodeAuth,
 } from "./auth-login.js";
 import {
   DEFAULT_MODEL_ID,
@@ -397,7 +395,7 @@ export const CommandCodePlugin: Plugin = async (
               return {
                 url: "https://commandcode.ai/docs/plans/go",
                 instructions:
-                  "Command Code Go-plan session found (from `cmd login`). Click Complete — no API key needed.",
+                  "Command Code Go-plan session found (from `cmd login`). Click Complete — no paste needed.",
                 method: "auto" as const,
                 async callback() {
                   return {
@@ -418,11 +416,12 @@ export const CommandCodePlugin: Plugin = async (
             return {
               url: current.url,
               instructions:
-                "Opens Command Code Studio CLI login (Go plan, $1/mo). Approve in the browser — session is posted back automatically. Live models load from `cmd --list-models` after login.",
-              method: "auto" as const,
-              async callback() {
+                "Open the URL, click Authorize, then paste the API key Studio shows (or paste ok if the browser says you're all set). Same flow as `cmd login`.",
+              method: "code" as const,
+              async callback(code: string) {
                 try {
-                  const tokens = await completeCommandBrowserLogin();
+                  const tokens = await completeCommandLoginWithCode(code);
+                  refreshCommandModels();
                   return {
                     type: "success" as const,
                     refresh: tokens.refresh,
@@ -432,7 +431,7 @@ export const CommandCodePlugin: Plugin = async (
                 } catch (err) {
                   resetPendingCommandLogin();
                   log.error(
-                    "[opencode-commandcode] Go-plan OAuth failed",
+                    "[opencode-commandcode] Go-plan login failed",
                     err instanceof Error ? err.message : err,
                   );
                   return { type: "failed" as const };
@@ -461,43 +460,6 @@ export const CommandCodePlugin: Plugin = async (
                 };
               },
             };
-          },
-        },
-        {
-          type: "api",
-          label: "Enter Command Code API key",
-          prompts: [
-            {
-              type: "text",
-              key: "apiKey",
-              message: "Paste your Command Code API key / session token",
-              placeholder: "user_… or Studio key",
-              validate: (value) => {
-                if (!value || !value.trim()) return "API key is required";
-                if (value.trim().length < 16) return "Key looks too short";
-                return undefined;
-              },
-            },
-          ],
-          async authorize(inputs) {
-            const key = inputs?.apiKey?.trim() || inputs?.key?.trim() || "";
-            if (!key) return { type: "failed" as const };
-            const check = await validateCommandApiKey(key);
-            if (!check.valid) {
-              log.warn(
-                "[opencode-commandcode] API key validation failed",
-                check.error,
-              );
-              return { type: "failed" as const };
-            }
-            writeCommandCodeAuth({
-              key,
-              access: key,
-              refresh: "api-key",
-              expires: Date.now() + 1000 * 60 * 60 * 24 * 365,
-            });
-            refreshCommandModels();
-            return { type: "success" as const, key };
           },
         },
       ],
