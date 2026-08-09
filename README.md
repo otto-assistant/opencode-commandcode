@@ -65,7 +65,7 @@ opencode plugin file://$PWD
 
 ## Authenticate
 
-Requires the plugin to be installed (see above). Preferred: **Command Code Go plan ($1/mo)** browser login (same as `cmd login`). You can also paste an API key / session token.
+Requires the plugin to be installed (see above). Preferred: **Command Code Go plan ($1/mo)** browser login — same as `cmd login` (open URL → Authorize → paste the key Studio shows).
 
 ```bash
 # Option A — sync from Command Code CLI (recommended)
@@ -74,13 +74,10 @@ cmd login   # browser → Studio CLI auth (Go plan)
 opencode auth login --provider command-code
 # pick "Use existing cmd login session"
 
-# Option B — browser OAuth (Go $1)
+# Option B — browser login inside OpenCode (Go $1)
 opencode auth login --provider command-code
 # pick "Login with Command Code (Go $1)"
-
-# Option C — paste API key / session token
-opencode auth login --provider command-code
-# pick "Enter Command Code API key" and paste into the prompt field
+# open the URL, Authorize, then paste the API key (or ok if the browser already finished)
 ```
 
 Then start OpenCode, pick provider **command-code**, and choose any model from the live catalog (`cmd --list-models`). Laguna S 2.1 free is the default when available:
@@ -98,7 +95,7 @@ Laguna S 2.1 free requires an active Go (or higher) account with credits on file
 | **Gateway proxy** | Talks to `api.commandcode.ai/alpha/generate` — same transport as the `cmd` CLI (`mode=agent`). |
 | **Live model catalog** | Discovered from `cmd --list-models` (enriched by the installed CLI’s models.md) — not hardcoded. |
 | **Laguna S 2.1 free** | Default when present — 256k context, $0 while the deal lasts. |
-| **Auth options** | Go-plan browser OAuth, sync from `cmd login`, or paste an API key / session token. |
+| **Auth options** | Go-plan browser login (URL → paste key, same as `cmd login`) or sync an existing CLI session. |
 | **Agent-grade tools** | OpenCode tool calls park and resume; MCP-prefixed tools are tracked separately. |
 | **Attachments** | Images, PDFs, text/binary files from OpenCode. Text-only models get image placeholders (Command Code behavior). |
 | **Auto-compact** | Context-fraction tips + tiered client compact before the 256k window overflows. |
@@ -162,7 +159,7 @@ Local pin refresh after a release:
 ## FAQ
 
 **Do I need a Studio API key?**  
-No. Prefer Go-plan browser login or sync from `cmd login`. You can also use **Enter Command Code API key** if you already have a session token.
+No. Use Go-plan browser login or sync from `cmd login`. After you Authorize in the browser, Studio may show a one-time key to paste into the OpenCode prompt — that key is part of the login flow, not a separate product API key.
 
 **Are only Laguna models available?**  
 No. The plugin loads the full live catalog from `cmd --list-models`. Laguna is just the default free model used for testing.

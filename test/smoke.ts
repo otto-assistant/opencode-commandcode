@@ -42,6 +42,7 @@ async function main() {
     buildCommandAuthUrl,
     startCommandBrowserLogin,
     resetPendingCommandLogin,
+    completeCommandLoginWithCode,
   } = await import("../src/auth-login.ts");
   const {
     startProxy,
@@ -368,12 +369,100 @@ claude-sonnet-5                      recommended
   const authUrl = buildCommandAuthUrl(5959, "test-state");
   assert.ok(authUrl.includes("commandcode.ai/studio/auth/cli"));
   assert.ok(authUrl.includes("callback="));
+  assert.ok(authUrl.includes("localhost%3A5959") || authUrl.includes("localhost:5959"));
   assert.ok(authUrl.includes("state=test-state"));
 
   const pendingLogin = await startCommandBrowserLogin();
   assert.ok(pendingLogin.url.includes("/studio/auth/cli"));
   assert.ok(pendingLogin.port >= 5959);
+  // Callback server must answer Private Network Access preflight (Studio → localhost).
+  {
+    const preflight = await fetch(
+      `http://127.0.0.1:${pendingLogin.port}/callback`,
+      {
+        method: "OPTIONS",
+        headers: {
+          Origin: "https://commandcode.ai",
+          "Access-Control-Request-Method": "POST",
+          "Access-Control-Request-Private-Network": "true",
+        },
+      },
+    );
+    assert.equal(preflight.status, 204);
+    assert.equal(
+      preflight.headers.get("access-control-allow-origin"),
+      "https://commandcode.ai",
+    );
+    assert.equal(
+      preflight.headers.get("access-control-allow-private-network"),
+      "true",
+    );
+  }
+  // Simulate Studio POST → then finish via paste-code path with "ok".
+  {
+    const post = await fetch(
+      `http://127.0.0.1:${pendingLogin.port}/callback`,
+      {
+        method: "POST",
+        headers: {
+          Origin: "https://commandcode.ai",
+          "Content-Type": "application/json",
+        },
+        body: JSON.stringify({
+          apiKey: "test-session-key-from-studio-callback",
+          userId: "user_test",
+          userName: "Test User",
+          keyName: "opencode-oauth",
+          state: pendingLogin.state,
+        }),
+      },
+    );
+    assert.equal(post.status, 200);
+    const tokens = await completeCommandLoginWithCode("ok");
+    assert.equal(tokens.access, "test-session-key-from-studio-callback");
+    assert.equal(tokens.key, "test-session-key-from-studio-callback");
+  }
   resetPendingCommandLogin();
+
+  // --- plugin auth methods: oauth code paste, no standalone API-key method ---
+  {
+    const hooks = await CommandCodePlugin({} as any);
+    assert.ok(hooks.auth);
+    const methods = hooks.auth!.methods;
+    assert.ok(Array.isArray(methods) && methods.length >= 1);
+    assert.ok(
+      !methods.some(
+        (m: any) =>
+          m.type === "api" ||
+          (typeof m.label === "string" &&
+            m.label.toLowerCase().includes("enter command code api key")),
+      ),
+      "standalone Enter API key method must not be registered",
+    );
+    const goLogin = methods.find(
+      (m: any) =>
+        m.type === "oauth" &&
+        typeof m.label === "string" &&
+        m.label.includes("Login with Command Code"),
+    ) as any;
+    assert.ok(goLogin, "Go login oauth method missing");
+    // Without an existing CLI session, authorize should return method "code".
+    // (If env already has cmd credentials, it returns auto — still valid.)
+    const authStart = await goLogin.authorize();
+    assert.ok(authStart.url);
+    assert.ok(
+      authStart.method === "code" || authStart.method === "auto",
+      `unexpected auth method ${authStart.method}`,
+    );
+    if (authStart.method === "code") {
+      assert.ok(authStart.url.includes("/studio/auth/cli"));
+      assert.ok(
+        /paste/i.test(authStart.instructions || ""),
+        "code-flow instructions should mention paste",
+      );
+    }
+    resetPendingCommandLogin();
+  }
 
   // --- plugin export ---
   assert.equal(typeof CommandCodePlugin, "function");
