@@ -23,6 +23,46 @@ export type DiscoveredModelMeta = {
   reasoning: boolean;
 };
 
+/**
+ * Command Code deliberately models vision support as an exclusion list. Read
+ * that list from the installed CLI bundle so our capabilities stay in lockstep
+ * with the exact CLI version making the same gateway request.
+ */
+function readCliTextOnlyModels(cmdPath: string | null): Set<string> | null {
+  const root = findCommandCodePackageRoot(cmdPath);
+  if (!root) return null;
+  const bundle = join(root, "dist", "cli.mjs");
+  if (!existsSync(bundle)) return null;
+  try {
+    const source = readFileSync(bundle, "utf8");
+    const marker = source.indexOf('function isKnownTextOnlyModel');
+    if (marker < 0) return null;
+    const prefix = source.slice(Math.max(0, marker - 12_000), marker);
+    const matches = [...prefix.matchAll(/new Set\((\[[^;]{1,12000}?\])\)/g)];
+    for (const match of matches.reverse()) {
+      try {
+        const values = JSON.parse(match[1]) as unknown;
+        if (
+          Array.isArray(values) &&
+          values.every((v) => typeof v === "string") &&
+          values.includes(LAGUNA_MODEL_ID)
+        ) {
+          return new Set(values.map((id) => id.toLowerCase()));
+        }
+      } catch {
+        // Minified bundle also contains Sets with symbolic array entries.
+      }
+    }
+    return null;
+  } catch (err) {
+    log.warn(
+      "[opencode-commandcode] could not read CLI modality registry",
+      err instanceof Error ? err.message : err,
+    );
+    return null;
+  }
+}
+
 const DEFAULT_CONTEXT = 256_000;
 const DEFAULT_OUTPUT = 32_768;
 const HEADER_WORDS = new Set([
@@ -221,6 +261,7 @@ export function discoverCommandModels(): DiscoveredModelMeta[] {
   }
 
   const byId = new Map<string, DiscoveredModelMeta>();
+  const textOnly = readCliTextOnlyModels(cmdPath);
 
   // Prefer live CLI listing order; enrich from models.md when present.
   for (const row of listed) {
@@ -241,7 +282,11 @@ export function discoverCommandModels(): DiscoveredModelMeta[] {
       description: row.description,
       contextWindow: enrich?.contextWindow ?? DEFAULT_CONTEXT,
       maxTokens: enrich?.maxTokens ?? DEFAULT_OUTPUT,
-      vision: enrich?.vision ?? false,
+      // The CLI's own registry is authoritative. Its behavior is: known
+      // text-only models strip images; every other listed model accepts them.
+      vision: textOnly
+        ? !textOnly.has((enrich?.id || row.id).toLowerCase())
+        : (enrich?.vision ?? false),
       free,
       efforts: enrich?.efforts ?? [],
       reasoning: enrich ? enrich.reasoning : true,

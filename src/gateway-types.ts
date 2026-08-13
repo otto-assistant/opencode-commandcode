@@ -71,7 +71,7 @@ export type GenerateBody = {
   };
   memory: null;
   taste: null;
-  skills: null;
+  skills: unknown;
   permissionMode: "standard" | "auto-accept" | "plan";
   threadId?: string;
   mode?:

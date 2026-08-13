@@ -111,9 +111,11 @@ OpenCode
                  └─ poolside/laguna-s-2.1-free (default)
 ```
 
-Model catalog: live from `cmd --list-models`. Aliases like `laguna` / `laguna-s-2.1-free`
-resolve to `poolside/laguna-s-2.1-free` when that model is present. Auth credentials are
-mirrored between OpenCode `auth.json` and `~/.commandcode/auth.json`.
+Model catalog: live from `cmd --list-models`, with context, reasoning efforts, and the
+installed CLI's own text-only/vision registry. Each upstream model appears exactly once
+in OpenCode; request aliases like `laguna` / `laguna-s-2.1-free` still resolve to
+`poolside/laguna-s-2.1-free`. Auth credentials are mirrored between OpenCode `auth.json`
+and `~/.commandcode/auth.json`.
 
 ## Requirements
 

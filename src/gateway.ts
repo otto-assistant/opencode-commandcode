@@ -3,6 +3,8 @@
  */
 import { createHash, randomUUID } from "node:crypto";
 import { readdirSync } from "node:fs";
+import { basename } from "node:path";
+import { spawnSync } from "node:child_process";
 import {
   GENERATE_ROUTE,
   emptyUsage,
@@ -14,6 +16,119 @@ import {
   type WireUsage,
 } from "./gateway-types.js";
 import { log } from "./log.js";
+import { resolveCommandCodeExecutable } from "./executable-path.js";
+
+let cachedCliVersion: string | null = null;
+const MODEL_CALL_MAX_ATTEMPTS = 10;
+const MODEL_CALL_BACKOFF_MIN_MS = 1_000;
+const MODEL_CALL_BACKOFF_MAX_MS = 10_000;
+const TERMINAL_ERROR_MARKERS = [
+  "premium_credits_exhausted",
+  "model_not_in_plan",
+  "insufficient credits",
+];
+
+function cliVersion(): string {
+  if (cachedCliVersion) return cachedCliVersion;
+  const executable = resolveCommandCodeExecutable();
+  if (executable) {
+    const result = spawnSync(executable, ["--version"], {
+      encoding: "utf8",
+      timeout: 4_000,
+      env: process.env,
+      windowsHide: true,
+    });
+    const match = `${result.stdout || ""} ${result.stderr || ""}`.match(/\d+\.\d+\.\d+(?:[-+][\w.-]+)?/);
+    if (match) return (cachedCliVersion = match[0]);
+  }
+  return "unknown";
+}
+
+function gitValue(cwd: string, args: string[]): string {
+  const result = spawnSync("git", args, {
+    cwd,
+    encoding: "utf8",
+    timeout: 3_000,
+    windowsHide: true,
+    stdio: ["ignore", "pipe", "ignore"],
+  });
+  return result.status === 0 ? (result.stdout || "").trim() : "";
+}
+
+export function commandRetryDelayMs(attempt: number): number {
+  return Math.min(
+    MODEL_CALL_BACKOFF_MAX_MS,
+    Math.max(MODEL_CALL_BACKOFF_MIN_MS, 100 * 2 ** attempt),
+  );
+}
+
+export function isRetryableGatewayError(input: {
+  status?: number | null;
+  isRetryable?: boolean;
+  message?: string;
+}): boolean {
+  if (input.isRetryable === true) return true;
+  if (typeof input.status === "number") {
+    return input.status === 429 || (input.status >= 500 && input.status <= 599);
+  }
+  if (input.isRetryable === false) return false;
+  const message = (input.message || "").toLowerCase();
+  return !TERMINAL_ERROR_MARKERS.some((marker) => message.includes(marker));
+}
+
+async function retryDelay(attempt: number, signal?: AbortSignal): Promise<void> {
+  const ms = commandRetryDelayMs(attempt);
+  if (!signal) {
+    await new Promise((resolve) => setTimeout(resolve, ms));
+    return;
+  }
+  if (signal.aborted) throw new DOMException("Aborted", "AbortError");
+  await new Promise<void>((resolve, reject) => {
+    const timer = setTimeout(() => {
+      signal.removeEventListener("abort", onAbort);
+      resolve();
+    }, ms);
+    const onAbort = () => {
+      clearTimeout(timer);
+      reject(new DOMException("Aborted", "AbortError"));
+    };
+    signal.addEventListener("abort", onAbort, { once: true });
+  });
+}
+
+function streamErrorInfo(event: StreamEvent): {
+  message: string;
+  status: number | null;
+  isRetryable?: boolean;
+} {
+  if (event.type !== "error") {
+    return { message: "Command Code stream error", status: null };
+  }
+  const error = event.error;
+  if (typeof error === "string") {
+    return { message: error, status: null };
+  }
+  if (error && typeof error === "object") {
+    const value = error as {
+      message?: unknown;
+      status?: unknown;
+      statusCode?: unknown;
+      isRetryable?: unknown;
+    };
+    const rawStatus = value.statusCode ?? value.status;
+    return {
+      message:
+        typeof value.message === "string"
+          ? value.message
+          : "Command Code stream error",
+      status: typeof rawStatus === "number" ? rawStatus : null,
+      ...(typeof value.isRetryable === "boolean"
+        ? { isRetryable: value.isRetryable }
+        : {}),
+    };
+  }
+  return { message: "Command Code stream error", status: null };
+}
 
 export type GatewayAuthHeaders = {
   apiKey: string;
@@ -28,6 +143,8 @@ export type GatewayGenerateParams = {
   messages: WireMessage[];
   tools?: WireTool[];
   system?: string;
+  /** OpenCode skills are already disclosed in its system prompt and skill tool. */
+  skills?: unknown;
   maxTokens?: number;
   temperature?: number;
   effort?: string;
@@ -71,7 +188,7 @@ export function buildAuthHeaders(auth: GatewayAuthHeaders): Record<string, strin
     Accept: "application/json",
     "User-Agent": "cli",
     Authorization: `Bearer ${auth.apiKey}`,
-    "x-command-code-version": auth.cliVersion || "1.15.0",
+    "x-command-code-version": auth.cliVersion || cliVersion(),
     "x-cli-environment": "cli",
     "x-taste-learning": "false",
     "x-co-flag": "false",
@@ -95,21 +212,30 @@ export function buildGenerateBody(
     structure = [];
   }
 
+  const gitRoot = gitValue(cwd, ["rev-parse", "--show-toplevel"]);
+  const currentBranch = gitValue(cwd, ["branch", "--show-current"]);
+  const mainBranch = gitValue(cwd, ["symbolic-ref", "refs/remotes/origin/HEAD", "--short"])
+    .replace(/^origin\//, "");
+  const gitStatus = gitValue(cwd, ["status", "--short"]);
+  const recentCommits = gitValue(cwd, ["log", "-5", "--pretty=format:%h %s"])
+    .split("\n")
+    .filter(Boolean);
+
   return {
     config: {
       workingDir: cwd,
       date: new Date().toISOString().slice(0, 10),
       environment: process.platform,
       structure,
-      isGitRepo: false,
-      currentBranch: "",
-      mainBranch: "",
-      gitStatus: "",
-      recentCommits: [],
+      isGitRepo: Boolean(gitRoot),
+      currentBranch,
+      mainBranch,
+      gitStatus,
+      recentCommits,
     },
     memory: null,
     taste: null,
-    skills: null,
+    skills: params.skills ?? null,
     permissionMode: params.permissionMode || "auto-accept",
     ...(params.threadId ? { threadId: params.threadId } : {}),
     // Feature mode — must be a gateway feature id, not "default".
@@ -276,61 +402,137 @@ export async function* streamGenerate(
   const headers = buildAuthHeaders({
     apiKey: params.apiKey,
     sessionId: params.sessionId,
+    cliVersion: cliVersion(),
+    projectSlug: basename(process.env.OPENCODE_COMMANDCODE_CWD || process.cwd()),
   });
 
-  let stream: ReadableStream<Uint8Array>;
-  if (params.postStream) {
-    stream = await params.postStream(body, headers);
-  } else {
-    const fetchFn = params.fetchFn ?? fetch;
-    const baseUrl = (params.baseUrl ?? getApiBaseUrl()).replace(/\/$/, "");
-    const url = `${baseUrl}${GENERATE_ROUTE}`;
-    log.info("[opencode-commandcode] POST /alpha/generate", {
-      model: params.model,
-      toolCount: params.tools?.length ?? 0,
-      messageCount: params.messages.length,
-    });
-    let res: Response;
+  for (let attempt = 0; attempt < MODEL_CALL_MAX_ATTEMPTS; attempt++) {
+    let stream: ReadableStream<Uint8Array>;
     try {
-      res = await fetchFn(url, {
-        method: "POST",
-        headers,
-        body: JSON.stringify(body),
-        signal: params.signal,
-      });
+      if (params.postStream) {
+        stream = await params.postStream(body, headers);
+      } else {
+        const fetchFn = params.fetchFn ?? fetch;
+        const baseUrl = (params.baseUrl ?? getApiBaseUrl()).replace(/\/$/, "");
+        const url = `${baseUrl}${GENERATE_ROUTE}`;
+        log.info("[opencode-commandcode] POST /alpha/generate", {
+          model: params.model,
+          toolCount: params.tools?.length ?? 0,
+          messageCount: params.messages.length,
+          attempt: attempt + 1,
+        });
+        const res = await fetchFn(url, {
+          method: "POST",
+          headers,
+          body: JSON.stringify(body),
+          signal: params.signal,
+        });
+        if (!res.ok) {
+          const text = await res.text().catch(() => "");
+          if (
+            attempt < MODEL_CALL_MAX_ATTEMPTS - 1 &&
+            isRetryableGatewayError({ status: res.status, message: text })
+          ) {
+            log.warn("[opencode-commandcode] transient gateway response; retrying", {
+              status: res.status,
+              attempt: attempt + 1,
+            });
+            await retryDelay(attempt, params.signal);
+            continue;
+          }
+          yield {
+            kind: "error",
+            text: `POST ${GENERATE_ROUTE} → ${res.status} ${text.slice(0, 500)}`,
+          };
+          return;
+        }
+        if (!res.body) throw new Error("empty stream body");
+        stream = res.body;
+      }
     } catch (err) {
+      if (params.signal?.aborted) throw err;
+      if (attempt < MODEL_CALL_MAX_ATTEMPTS - 1) {
+        log.warn("[opencode-commandcode] gateway connection failed; retrying", {
+          attempt: attempt + 1,
+          error: err instanceof Error ? err.message : String(err),
+        });
+        await retryDelay(attempt, params.signal);
+        continue;
+      }
       yield {
         kind: "error",
-        text:
-          err instanceof Error
-            ? `network error: ${err.message}`
-            : "network error",
+        text: err instanceof Error ? `network error: ${err.message}` : "network error",
       };
       return;
     }
-    if (!res.ok) {
-      const text = await res.text().catch(() => "");
-      yield {
-        kind: "error",
-        text: `POST ${GENERATE_ROUTE} → ${res.status} ${text.slice(0, 500)}`,
-      };
-      return;
-    }
-    if (!res.body) {
-      yield { kind: "error", text: "empty stream body" };
-      return;
-    }
-    stream = res.body;
-  }
 
-  for await (const line of readNdjsonLines(stream)) {
-    let parsed: StreamEvent;
+    let emittedVisible = false;
+    let finished = false;
+    let retry = false;
+    let terminalError = false;
     try {
-      parsed = JSON.parse(line) as StreamEvent;
-    } catch {
-      continue;
+      for await (const line of readNdjsonLines(stream)) {
+        let parsed: StreamEvent;
+        try {
+          parsed = JSON.parse(line) as StreamEvent;
+        } catch {
+          continue;
+        }
+        if (parsed.type === "error") {
+          const info = streamErrorInfo(parsed);
+          if (
+            !emittedVisible &&
+            attempt < MODEL_CALL_MAX_ATTEMPTS - 1 &&
+            isRetryableGatewayError(info)
+          ) {
+            retry = true;
+            log.warn("[opencode-commandcode] transient stream error; retrying", {
+              attempt: attempt + 1,
+              status: info.status,
+              error: info.message,
+            });
+            break;
+          }
+        }
+        const mapped = mapStreamEvent(parsed);
+        if (
+          mapped.kind === "text" ||
+          mapped.kind === "reasoning" ||
+          mapped.kind === "tool_call" ||
+          mapped.kind === "tool_result"
+        ) {
+          emittedVisible = true;
+        }
+        if (mapped.kind === "finish") finished = true;
+        if (mapped.kind === "error") terminalError = true;
+        yield mapped;
+      }
+    } catch (err) {
+      if (params.signal?.aborted) throw err;
+      if (!emittedVisible && attempt < MODEL_CALL_MAX_ATTEMPTS - 1) {
+        retry = true;
+        log.warn("[opencode-commandcode] stream connection failed; retrying", {
+          attempt: attempt + 1,
+          error: err instanceof Error ? err.message : String(err),
+        });
+      } else {
+        yield {
+          kind: "error",
+          text: `Stream connection failed mid-response: ${err instanceof Error ? err.message : String(err)}`,
+        };
+        return;
+      }
     }
-    yield mapStreamEvent(parsed);
+
+    if (terminalError) return;
+    if (retry || (!finished && !emittedVisible)) {
+      if (attempt < MODEL_CALL_MAX_ATTEMPTS - 1) {
+        await retryDelay(attempt, params.signal);
+        continue;
+      }
+      yield { kind: "error", text: "stream ended before completion" };
+    }
+    return;
   }
 }
 

@@ -72,49 +72,17 @@ function metaToModel(meta: DiscoveredModelMeta): CommandModel {
   };
 }
 
-function withAliases(models: CommandModel[]): CommandModel[] {
-  const out: CommandModel[] = [];
-  const seen = new Set<string>();
-  const add = (m: CommandModel) => {
-    if (seen.has(m.id)) return;
-    seen.add(m.id);
-    out.push(m);
-  };
-
-  for (const m of models) add(m);
-
-  // Short name after last "/" — Command Code accepts these.
-  for (const m of models) {
-    if (!m.resolvedId.includes("/")) continue;
-    const short = m.resolvedId.slice(m.resolvedId.lastIndexOf("/") + 1);
-    if (!short || seen.has(short)) continue;
-    add({ ...m, id: short });
+function normalizeCatalog(models: CommandModel[]): CommandModel[] {
+  const unique = new Map<string, CommandModel>();
+  for (const model of models) {
+    const key = model.resolvedId.toLowerCase();
+    if (!unique.has(key)) unique.set(key, model);
   }
-
-  // Friendly Laguna aliases when that model is in the live catalog.
-  const laguna = models.find((m) => m.resolvedId === LAGUNA_MODEL_ID);
-  if (laguna) {
-    if (!seen.has(DEFAULT_MODEL_ID)) {
-      add({ ...laguna, id: DEFAULT_MODEL_ID, name: laguna.name });
-    }
-    if (!seen.has("laguna")) {
-      add({ ...laguna, id: "laguna", name: laguna.name });
-    }
-  }
-
-  // Put default / Laguna aliases first for nicer OpenCode menus.
-  out.sort((a, b) => {
-    const rank = (m: CommandModel) => {
-      if (m.id === DEFAULT_MODEL_ID) return 0;
-      if (m.id === "laguna") return 1;
-      if (m.resolvedId === LAGUNA_MODEL_ID) return 2;
-      if (m.free) return 3;
-      return 4;
-    };
+  return [...unique.values()].sort((a, b) => {
+    const rank = (m: CommandModel) =>
+      m.resolvedId === LAGUNA_MODEL_ID ? 0 : m.free ? 1 : 2;
     return rank(a) - rank(b) || a.name.localeCompare(b.name);
   });
-
-  return out;
 }
 
 export function invalidateCommandModelCache(): void {
@@ -125,7 +93,7 @@ export function invalidateCommandModelCache(): void {
 /** Force a fresh discovery from the Command Code CLI. */
 export function refreshCommandModels(): CommandModel[] {
   const discovered = discoverCommandModels().map(metaToModel);
-  cachedModels = withAliases(discovered);
+  cachedModels = normalizeCatalog(discovered);
   cachedAt = Date.now();
   log.info("[opencode-commandcode] model catalog refreshed", {
     count: cachedModels.length,
@@ -155,7 +123,9 @@ export function isLoginPlaceholderModel(id: string): boolean {
 
 export function resolveCommandModelId(modelId: string): string {
   const cleaned = modelId.replace(/^command-code\//, "").trim();
-  if (!cleaned) return LAGUNA_MODEL_ID;
+  if (!cleaned || cleaned === DEFAULT_MODEL_ID || cleaned === "laguna") {
+    return LAGUNA_MODEL_ID;
+  }
 
   const models = getCommandModels();
   const exact = models.find(

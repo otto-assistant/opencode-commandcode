@@ -51,7 +51,6 @@ import {
 
 const DEFAULT_PROXY_PORT = 8797;
 const PROXY_PORT_SCAN_ATTEMPTS = 40;
-const SHARED_PROXY_HEALTH_TIMEOUT_MS = 750;
 
 /** Explicit pin via env, or `null` → pick a free port dynamically. */
 function envProxyPort(): number | null {
@@ -114,33 +113,14 @@ function isAddrInUseError(err: unknown): boolean {
   );
 }
 
-async function isProxyHealthyOn(port: number): Promise<boolean> {
-  const controller = new AbortController();
-  const timeout = setTimeout(
-    () => controller.abort(),
-    SHARED_PROXY_HEALTH_TIMEOUT_MS,
-  );
-  try {
-    const res = await fetch(`http://127.0.0.1:${port}/v1/models`, {
-      signal: controller.signal,
-    });
-    if (!res.ok) return false;
-    const body = (await res.json().catch(() => undefined)) as
-      | { object?: unknown; data?: unknown }
-      | undefined;
-    return !!body && body.object === "list" && Array.isArray(body.data);
-  } catch {
-    return false;
-  } finally {
-    clearTimeout(timeout);
-  }
-}
-
 async function bindProxy(port: number): Promise<number> {
   const hostname = "127.0.0.1";
   server = Bun.serve({
     hostname,
     port,
+    // CLI-compatible model retries can legitimately keep an HTTP request open
+    // beyond Bun's 10s default while the upstream gateway is recovering.
+    idleTimeout: 120,
     async fetch(req) {
       return handleRequest(req);
     },
@@ -156,7 +136,7 @@ async function bindProxy(port: number): Promise<number> {
  * Start the local OpenAI-compatible proxy.
  *
  * Port selection:
- * - `OPENCODE_COMMANDCODE_PROXY_PORT` → bind/reuse that exact port
+ * - `OPENCODE_COMMANDCODE_PROXY_PORT` → bind that exact port
  * - otherwise prefer `8797`, then scan upward, then fall back to OS ephemeral (`0`)
  */
 export async function startProxy(tokenProvider: TokenProvider): Promise<number> {
@@ -165,36 +145,15 @@ export async function startProxy(tokenProvider: TokenProvider): Promise<number> 
 
   const fixed = envProxyPort();
   if (fixed !== null) {
-    if (await isProxyHealthyOn(fixed)) {
-      proxyPort = fixed;
-      log.info(
-        `[opencode-commandcode] reusing healthy proxy on ${getCommandProxyBaseUrl()}`,
-      );
-      return proxyPort;
-    }
     try {
       return await bindProxy(fixed);
     } catch (err) {
-      if (isAddrInUseError(err) && (await isProxyHealthyOn(fixed))) {
-        proxyPort = fixed;
-        log.info(
-          `[opencode-commandcode] port ${fixed} in use; reusing existing proxy`,
-        );
-        return proxyPort;
-      }
       throw err;
     }
   }
 
-  // Dynamic: reuse preferred default when a healthy proxy is already there.
-  if (await isProxyHealthyOn(DEFAULT_PROXY_PORT)) {
-    proxyPort = DEFAULT_PROXY_PORT;
-    log.info(
-      `[opencode-commandcode] reusing healthy proxy on ${getCommandProxyBaseUrl()}`,
-    );
-    return proxyPort;
-  }
-
+  // Never reuse a proxy owned by another OpenCode process: its token provider,
+  // plugin build, model cache, and session bridge state belong to that process.
   for (let i = 0; i < PROXY_PORT_SCAN_ATTEMPTS; i++) {
     const candidate = DEFAULT_PROXY_PORT + i;
     try {

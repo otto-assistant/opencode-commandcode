@@ -4,6 +4,18 @@
  */
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
+import { existsSync, readFileSync, unlinkSync, writeFileSync } from "node:fs";
+import { homedir } from "node:os";
+import { join } from "node:path";
+
+function snapshotFile(path: string): { path: string; content: Buffer | null } {
+  return { path, content: existsSync(path) ? readFileSync(path) : null };
+}
+
+function restoreFile(snapshot: { path: string; content: Buffer | null }): void {
+  if (snapshot.content) writeFileSync(snapshot.path, snapshot.content);
+  else if (existsSync(snapshot.path)) unlinkSync(snapshot.path);
+}
 
 async function main() {
   const {
@@ -70,7 +82,14 @@ async function main() {
     totalUsageAcrossSessions,
     usageToOpenAI,
   } = await import("../src/usage.ts");
-  const { mapStreamEvent, buildGenerateBody, buildAuthHeaders } = await import(
+  const {
+    mapStreamEvent,
+    buildGenerateBody,
+    buildAuthHeaders,
+    commandRetryDelayMs,
+    isRetryableGatewayError,
+    streamGenerate,
+  } = await import(
     "../src/gateway.ts"
   );
   const { detectCommandCode } = await import("../src/detect.ts");
@@ -103,6 +122,16 @@ async function main() {
     const variants = buildEffortVariants(laguna);
     assert.equal(typeof variants, "object");
   }
+  assert.equal(
+    new Set(models.map((m) => m.resolvedId.toLowerCase())).size,
+    models.length,
+    "catalog must expose each upstream model exactly once (no alias duplicates)",
+  );
+  assert.equal(
+    models.filter((m) => m.resolvedId === LAGUNA_MODEL_ID).length,
+    1,
+    "Laguna must appear once in the picker",
+  );
 
   const parsedList = parseListModelsOutput(`
 Available models  ·  2 models
@@ -334,6 +363,19 @@ claude-sonnet-5                      recommended
   const headers = buildAuthHeaders({ apiKey: "test-key", sessionId: "s1" });
   assert.equal(headers.Authorization, "Bearer test-key");
   assert.equal(headers["x-session-id"], "s1");
+  assert.equal(commandRetryDelayMs(0), 1_000);
+  assert.equal(commandRetryDelayMs(9), 10_000);
+  assert.equal(isRetryableGatewayError({ status: 429 }), true);
+  assert.equal(isRetryableGatewayError({ status: 503 }), true);
+  assert.equal(isRetryableGatewayError({ status: 401 }), false);
+  assert.equal(
+    isRetryableGatewayError({ message: "Service temporarily unavailable" }),
+    true,
+  );
+  assert.equal(
+    isRetryableGatewayError({ message: "premium_credits_exhausted" }),
+    false,
+  );
   const body = buildGenerateBody({
     apiKey: "test-key",
     model: LAGUNA_MODEL_ID,
@@ -342,6 +384,9 @@ claude-sonnet-5                      recommended
   });
   assert.equal(body.params.model, LAGUNA_MODEL_ID);
   assert.equal(body.params.stream, true);
+  assert.equal(body.skills, null, "match current Command Code CLI gateway body");
+  assert.equal(body.config.isGitRepo, true);
+  assert.ok(body.config.currentBranch);
 
   assert.deepEqual(mapStreamEvent({ type: "text-delta", text: "Hi" }), {
     kind: "text",
@@ -356,6 +401,48 @@ claude-sonnet-5                      recommended
     }).kind,
     "finish",
   );
+
+  // CLI-compatible retry: transient stream error before visible output is
+  // discarded, then the exact same request is retried.
+  {
+    let calls = 0;
+    const retryEvents: string[] = [];
+    for await (const event of streamGenerate({
+      apiKey: "test-key",
+      model: LAGUNA_MODEL_ID,
+      messages: [{ role: "user", content: [{ type: "text", text: "hi" }] }],
+      postStream: async () => {
+        calls++;
+        const lines =
+          calls === 1
+            ? [{
+                type: "error",
+                error: {
+                  message: "Service temporarily unavailable",
+                  statusCode: 503,
+                  isRetryable: true,
+                },
+              }]
+            : [
+                { type: "text-delta", text: "retry-ok" },
+                { type: "finish", finishReason: "stop" },
+              ];
+        return new ReadableStream<Uint8Array>({
+          start(controller) {
+            const encoder = new TextEncoder();
+            for (const line of lines) {
+              controller.enqueue(encoder.encode(`${JSON.stringify(line)}\n`));
+            }
+            controller.close();
+          },
+        });
+      },
+    })) {
+      if (event.kind === "text") retryEvents.push(event.text);
+    }
+    assert.equal(calls, 2);
+    assert.deepEqual(retryEvents, ["retry-ok"]);
+  }
 
   // --- detect (CLI may be present in this env) ---
   const detection = await detectCommandCode();
@@ -372,11 +459,23 @@ claude-sonnet-5                      recommended
   assert.ok(authUrl.includes("localhost%3A5959") || authUrl.includes("localhost:5959"));
   assert.ok(authUrl.includes("state=test-state"));
 
+  // The callback completion mirrors credentials into the real CLI/OpenCode
+  // auth files. Snapshot both so a smoke test can never replace live auth.
+  const authSnapshots = [
+    snapshotFile(join(homedir(), ".commandcode", "auth.json")),
+    snapshotFile(
+      join(
+        process.env.XDG_DATA_HOME || join(homedir(), ".local", "share"),
+        "opencode",
+        "auth.json",
+      ),
+    ),
+  ];
   const pendingLogin = await startCommandBrowserLogin();
   assert.ok(pendingLogin.url.includes("/studio/auth/cli"));
   assert.ok(pendingLogin.port >= 5959);
   // Callback server must answer Private Network Access preflight (Studio → localhost).
-  {
+  try {
     const preflight = await fetch(
       `http://127.0.0.1:${pendingLogin.port}/callback`,
       {
@@ -397,9 +496,7 @@ claude-sonnet-5                      recommended
       preflight.headers.get("access-control-allow-private-network"),
       "true",
     );
-  }
-  // Simulate Studio POST → then finish via paste-code path with "ok".
-  {
+    // Simulate Studio POST → then finish via paste-code path with "ok".
     const post = await fetch(
       `http://127.0.0.1:${pendingLogin.port}/callback`,
       {
@@ -421,8 +518,10 @@ claude-sonnet-5                      recommended
     const tokens = await completeCommandLoginWithCode("ok");
     assert.equal(tokens.access, "test-session-key-from-studio-callback");
     assert.equal(tokens.key, "test-session-key-from-studio-callback");
+  } finally {
+    resetPendingCommandLogin();
+    for (const snapshot of authSnapshots) restoreFile(snapshot);
   }
-  resetPendingCommandLogin();
 
   // --- plugin auth methods: oauth code paste, no standalone API-key method ---
   {
@@ -726,14 +825,19 @@ claude-sonnet-5                      recommended
   // startProxy must bind another free port (not fail).
   {
     delete process.env.OPENCODE_COMMANDCODE_PROXY_PORT;
-    const blocker = Bun.serve({
-      hostname: "127.0.0.1",
-      port: 8797,
-      fetch() {
-        return new Response("blocked");
-      },
-    });
+    let blocker: ReturnType<typeof Bun.serve> | null = null;
     try {
+      try {
+        blocker = Bun.serve({
+          hostname: "127.0.0.1",
+          port: 8797,
+          fetch() {
+            return new Response("blocked");
+          },
+        });
+      } catch {
+        // Another OpenCode process may already own the preferred port.
+      }
       const dynPort = await startProxy(async () => "test-api-key");
       assert.ok(dynPort > 0);
       assert.notEqual(dynPort, 8797);
@@ -742,7 +846,7 @@ claude-sonnet-5                      recommended
       assert.equal(healthDyn.status, 200);
       await stopProxy();
     } finally {
-      blocker.stop(true);
+      blocker?.stop(true);
     }
   }
 

@@ -105,7 +105,7 @@ function buildProviderModel(
         audio: false,
         image: model.vision,
         video: false,
-        pdf: true,
+        pdf: false,
       },
       output: {
         text: true,
@@ -139,7 +139,7 @@ function buildConfigModelEntry(model: CommandModel): Record<string, unknown> {
   const variants = buildConfigVariants(model);
   return {
     name: model.name,
-    reasoning: false,
+    reasoning: model.reasoning,
     tool_call: true,
     modalities: {
       input: model.vision ? ["text", "image"] : ["text"],
@@ -171,15 +171,6 @@ function buildProviderModels(
       buildProviderModel(model, model.id, baseURL),
     ]),
   );
-  const defaultModel =
-    models.find((m) => m.id === DEFAULT_MODEL_ID) || models[0];
-  if (defaultModel && !(DEFAULT_MODEL_ID in providerModels)) {
-    providerModels[DEFAULT_MODEL_ID] = buildProviderModel(
-      defaultModel,
-      DEFAULT_MODEL_ID,
-      baseURL,
-    );
-  }
   return providerModels;
 }
 
@@ -204,15 +195,6 @@ function ensureProviderConfig(
   const seededModels = Object.fromEntries(
     models.map((model) => [model.id, buildConfigModelEntry(model)]),
   );
-  const defaultModel =
-    models.find((m) => m.id === DEFAULT_MODEL_ID) || models[0];
-  if (defaultModel && !(DEFAULT_MODEL_ID in seededModels)) {
-    seededModels[DEFAULT_MODEL_ID] = {
-      ...buildConfigModelEntry(defaultModel),
-      name: `Default (${defaultModel.name})`,
-    };
-  }
-
   config.provider[PROVIDER_ID] = {
     ...existing,
     name:
